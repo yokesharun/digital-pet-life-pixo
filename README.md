@@ -1,5 +1,3 @@
-# digital-pet-pixo
-
 PIXO PET LIFE v3 | MENU + BRIGHTNESS + AUTO NIGHT + WARDROBE
 ==========================================================
 Firmware for the classic ESP32 38-pin development board and a 128x64
