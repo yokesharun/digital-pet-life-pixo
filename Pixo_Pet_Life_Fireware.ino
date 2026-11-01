@@ -1,38 +1,9 @@
 /*
-  PIXO - Pet Life v4: OLED contrast, auto night, nonblocking kawaii buzzer,
-  protected NVS factory reset, 12 non-overlapping cute accessories.
-  Built on PIXO_Lively_WiFi_Clock.ino; OLED 128x64 classic ESP32.
-  Based on PIXO_Touch_AutoReturn.ino; retains original eye drawing,
-  blinking, random relaxed/bright faces, balloon hearts, wake/sleep and
-  independent 1150-ms TTP223 pet auto-return.
-  To set up: edit WIFI_SSID and WIFI_PASSWORD in USER SETTINGS below.
-
-  IMPORTANT TTP223 HARDWARE LIMITATION: a slow 2-5 s HIGH signal cannot
-  distinguish a short tap from a real long hold. The calendar hold gesture
-  is best with USE_NATIVE_ESP32_TOUCH=1 (bare pad on GPIO32), or a TTP223
-  module configured for momentary mode with fast release (not toggle).
-
-  PIXO - Fast auto-return touch petting (ESP32 + SSD1306 128x64)
-  -------------------------------------------------------------
-  Default wiring: TTP223 OUT -> GPIO32, VCC -> 3V3, GND -> GND.
-  OLED: SDA -> GPIO25, SCL -> GPIO26.
-
-  FIX: Some TTP223 modules leave OUT HIGH for 2-5 seconds after a tap.
-  PIXO now shows the inverted-V eyes, bounce, hearts and sparkles promptly,
-  then returns to NORMAL in around 1.15 seconds from the latest physical
-  digital rising edge, even if the TTP223 indicator stays lit.
-  Every new OUT LOW->HIGH edge starts a fresh reaction, including edges
-  received during an ongoing reaction. NO boot animation on touch.
-
-  If you need unlimited continuous hold effects, set
-  CONTINUE_PET_WHILE_TOUCH_HIGH to 1 ONLY after fixing the module's slow
-  release; otherwise the 5-second stuck-HIGH problem will return.
-  With bare GPIO32 capacitive electrode (USE_NATIVE_ESP32_TOUCH=1),
-  true continuous hold is supported automatically until real release.
-
-  HARDWARE LIMITATION: While TTP223 OUT stays HIGH after release, ESP32
-  cannot distinguish subsequent taps; use a fast-releasing TTP223 in
-  momentary mode (B/TOG jumper open), or use native ESP32 touch.
+ PIXO Pet Life v6 - longer kawaii shows, expressive sleepy face, feeding,
+ simplified 250Hz beep, first-start-of-day greetings and no touch sensor.
+ Classic ESP32 38-pin + SSD1306 128x64 I2C. GPIO25 SDA, GPIO26 SCL;
+ A on GPIO18->GND, B on GPIO19->GND; passive piezo on GPIO27->GND.
+ No connection is required on GPIO32. All pre-existing pet NVS data is kept.
 */
 
 #include <Arduino.h>
@@ -43,6 +14,9 @@
 #include <math.h>
 #include <string.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <stdlib.h>
 #include <time.h>
 #include <stdio.h>
 #include <Preferences.h>
@@ -64,17 +38,18 @@ const char WIFI_PASSWORD[] = "";      // <-- Enter your password
 const char PET_OWNER_NAME[] = "MY HUMAN";  // <--- EDIT OWNER NAME HERE
 constexpr uint8_t BUTTON_A_PIN = 18;      // MENU / BACK, to GND
 constexpr uint8_t BUTTON_B_PIN = 19;      // NEXT / SELECT, to GND
-// PASSIVE (non-self-oscillating) piezo ONLY for tunable melodies/volume.
-// GPIO32 is ALREADY the TTP223 touch input: DO NOT put a buzzer there!
+// Use a low-current PASSIVE piezo for fixed 250 Hz output.
+// GPIO32 is now UNUSED; old touch sensor has been completely removed.
 // 2-wire passive piezo: + -> GPIO27; - -> shared GND.
 // Use an NPN driver for modules drawing more current than a GPIO can safely source.
 constexpr uint8_t BUZZER_PIN = 27;
 constexpr bool BUZZER_ENABLED_DEFAULT = true;
-constexpr uint8_t BUZZER_VOLUME_DEFAULT = 2; // 0..4; 0=mute
-constexpr uint8_t BUZZER_MAX_VOLUME = 4;
+constexpr uint16_t BUZZER_FIXED_HZ = 250; // Base PWM; secret jingles vary pitch.
+constexpr bool TEST_MODE_DEFAULT = false; // Developer secret-preview mode
+constexpr bool WEATHER_ENABLED = true;
 constexpr uint8_t BUZZER_LEDC_CHANNEL = 5; // Arduino-ESP32 2.x only
 constexpr uint8_t BUZZER_PWM_BITS = 10;    // 0..1023 PWM duty
-// Kawaii melodies are original little tone sequences (not a prerecorded song).
+// All melodies are original, with sound ON/OFF only (no software volume slider).
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 22;
 constexpr uint32_t BUTTON_LONG_MS = 750;
 constexpr uint32_t PROFILE_AUTOSAVE_MS = 10000;
@@ -90,56 +65,32 @@ constexpr uint8_t NIGHT_START_HOUR = 22;  // 10 PM local synced time
 constexpr uint8_t NIGHT_END_HOUR = 7;     // 7 AM local synced time
 constexpr uint32_t RESET_HOLD_MS = 3000; // armed reset needs uninterrupted B hold
 
-constexpr uint32_t INTRO_HELLO_MS = 2500;
-constexpr uint32_t INTRO_PROFILE_MS = 2550;
-constexpr uint32_t INTRO_BIRTHDAY_MS = 4600;
+constexpr uint32_t INTRO_HELLO_MS = 5500;
+constexpr uint32_t INTRO_PROFILE_MS = 5200;
+constexpr uint32_t INTRO_BIRTHDAY_MS = 14600;
 constexpr uint32_t PEEK_MS = 2700;
 constexpr uint32_t DANCE_MS = 2850;
 constexpr uint32_t UPSIDE_DOWN_MS = 3000;
 constexpr uint32_t STARRY_MS = 2350;
-constexpr uint32_t SECRET_CELEBRATE_MS = 2550;
-constexpr long TIMEZONE_GMT_OFFSET_SEC = 5 * 3600 + 30 * 60; // India (IST)
-constexpr int TIMEZONE_DAYLIGHT_OFFSET_SEC = 0;
+constexpr uint32_t SECRET_CELEBRATE_MS = 12550; // old 2550 ms + 10 seconds
+const char TIMEZONE_NAME[] = "Asia/Kolkata";
+const char TIMEZONE_POSIX[] = "IST-5:30"; // No DST (UTC+05:30)
 const char NTP_SERVER_1[] = "pool.ntp.org";
 const char NTP_SERVER_2[] = "time.google.com";
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 9000;
 constexpr uint32_t NTP_SYNC_TIMEOUT_MS = 5500;
-constexpr uint32_t WIFI_STATUS_HOLD_MS = 600;
-constexpr uint32_t INTRO_FIRST_SCREEN_MIN_MS = 1750;
-// Long holds require a sensor that promptly releases its output.
-// With a slow-release TTP223, false calendar holds cannot be solved in code.
-// Longer than the observed 2-5 s TTP223 LED tail after a single tap.
-// A real long touch must last ~5.6 s on this hardware; for quick reliable
-// holds switch to native GPIO32 touch (850 ms) or a fast-release sensor.
-constexpr uint32_t TTP223_CALENDAR_HOLD_MS = 5600;
-constexpr uint32_t NATIVE_CALENDAR_HOLD_MS = 850;
-constexpr bool CALENDAR_ON_LONG_TOUCH = true;
-
+constexpr uint32_t WIFI_STATUS_HOLD_MS = 1300;
+constexpr uint32_t INTRO_FIRST_SCREEN_MIN_MS = 3300;
+// Removed TTP223 and GPIO32 capacitive touch handling entirely.
 constexpr int OLED_SDA    = 25;
 constexpr int OLED_SCL    = 26;
-constexpr int TOUCH_PIN   = 32;           // TTP223 OUT connects here
-#ifndef USE_NATIVE_ESP32_TOUCH
-#define USE_NATIVE_ESP32_TOUCH 0  // 0 = external TTP223; 1 = bare touch electrode on GPIO32 (classic ESP32 only)
-#endif
-constexpr uint8_t TOUCH_ACTIVE = HIGH;   // default TTP223: HIGH on touch
-// If your module is configured active-LOW, change HIGH to LOW above.
-constexpr uint8_t TOUCH_IDLE = (TOUCH_ACTIVE == HIGH) ? LOW : HIGH;
-constexpr bool TOUCH_DEBUG = true;       // Serial Monitor 115200: TOUCH DOWN/UP
-
+// GPIO32 deliberately left unconfigured; no touch component required.
 constexpr uint8_t OLED_ADDR = 0x3C;         // alternative is often 0x3D
+constexpr uint32_t PET_HEART_LIFETIME_MS = 750;
 constexpr uint32_t FRAME_MS = 33;           // about 30 FPS
-constexpr uint32_t DEBOUNCE_MS = 3;          // short filter: hardware TTP223 already debounces
-constexpr uint32_t HELD_HEART_EVERY_MS = 360;  // extra hearts during real held touch
-constexpr uint32_t PET_AFTER_TAP_MS = 1150;   // auto-return after ~1.15 seconds
-constexpr uint32_t PET_HEART_LIFETIME_MS = 750; // finish particles before hard timeout
-// Default 0: ignore stuck-HIGH sensor state after PET_AFTER_TAP_MS.
-// Only set to 1 if your TTP223 releases immediately when finger is lifted.
-constexpr bool CONTINUE_PET_WHILE_TOUCH_HIGH = false;
-// Native GPIO32 touch auto-calibrates on boot. Do not touch the electrode at boot.
-constexpr uint8_t NATIVE_TOUCH_PERCENT_OF_BASELINE = 70;
-
+// Touch-event constants removed. Eye, heart and pet animations are retained.
 constexpr bool AUTO_SLEEP = true;
-constexpr uint32_t IDLE_SLEEP_MS = 60000;   // 60 seconds after last touch
+constexpr uint32_t IDLE_SLEEP_MS = 600000;  // 10 minutes of inactivity
 constexpr uint32_t DROWSY_MS = 1800;
 constexpr uint32_t WAKE_MS = 730;
 constexpr uint32_t WAKE_POP_MS = 155;
@@ -157,7 +108,7 @@ constexpr uint32_t HEART_GAP_MAX_MS = 34000;
 constexpr uint32_t HEART_MS = 2850;
 
 constexpr uint32_t INTRO_BOX_MS = 620;
-constexpr uint32_t INTRO_NAME_MS = 1350;
+constexpr uint32_t INTRO_NAME_MS = 2300;
 constexpr uint32_t INTRO_CREDITS_MS = 1550;
 constexpr uint32_t INTRO_OPEN_MS = 440;
 constexpr uint32_t INTRO_PUSH_MS = 1430;
@@ -182,10 +133,11 @@ bool hasPreviousScreen = false;
 
 enum class State : uint8_t {
   INTRO_BOX, INTRO_NAME, INTRO_CREDITS, INTRO_PUSH, INTRO_OPEN,
-  INTRO_HELLO, INTRO_PROFILE, INTRO_BIRTHDAY,
+   INTRO_HELLO, INTRO_PROFILE, INTRO_BIRTHDAY, DAILY_GREETING,
   NORMAL, RELAXED, BRIGHT, HEARTS, PET, DROWSY, SLEEP, WAKING,
   WINK, MUSIC, EMBARRASSED, BALL_KICK, CALENDAR,
-  PEEK, DANCE, UPSIDE_DOWN, STARRY, MENU, SECRET_REACTION
+  PEEK, DANCE, UPSIDE_DOWN, STARRY, MENU, SECRET_REACTION,
+  WEATHER, FEEDING
 };
 enum class Blink : uint8_t { READY, CLOSING, OPENING, DOUBLE_PAUSE };
 State state = State::INTRO_BOX;
@@ -216,17 +168,11 @@ float targetX = 0.0f, targetY = 0.0f;
 float expressionGazeX = 0.0f, expressionGazeY = 0.0f;
 uint32_t gazeStarted = 0, gazeTravelMs = 380, nextLook = 0;
 
-// Debounced TTP223 output; invert TOUCH_ACTIVE for active-LOW modules.
-bool lastRawTouch = TOUCH_IDLE;
-bool stableTouch = TOUCH_IDLE;
-uint32_t touchChangedAt = 0;
-uint32_t petTapAt = 0;          // latest detected physical sensor edge
-uint32_t petHoldBurstAt = 0;    // latest repeated heart burst
-uint32_t touchCount = 0;
-uint32_t touchDownAt = 0;
-bool calendarHoldConsumed = false;
-bool petAfterWake = false;
-uint16_t nativeTouchThreshold = 0;
+// No touch sensor is connected.
+uint32_t petTapAt=0;
+uint32_t petHoldBurstAt=0;
+bool petAfterWake=false;
+// Kept petting animation capability; the physical touch input no longer exists.
 
 // ==================== PERSISTENT PET MEMORY ==========================
 // Preferences (ESP32 NVS) survives power-off and normal firmware uploads.
@@ -291,7 +237,7 @@ uint8_t menuPage = 0;
 bool menuDetail = false;
 uint32_t menuFeedbackUntil = 0;
 const char* const MENU_ITEMS[] = {
-  "My PIXO", "Calendar", "Battery", "Secrets", "Wardrobe", "Settings"
+  "My PIXO", "Calendar", "Battery", "Secrets", "Wardrobe", "Weather", "Settings"
 };
 constexpr uint8_t MENU_ITEMS_COUNT = sizeof(MENU_ITEMS)/sizeof(MENU_ITEMS[0]);
 // Settings are separate NVS keys to preserve the v2 PetProfile binary layout.
@@ -302,123 +248,112 @@ uint8_t editBrightnessLevel = DEFAULT_BRIGHTNESS_LEVEL;
 bool editAutoNightMode = DEFAULT_AUTO_NIGHT_MODE;
 // Separate NVS keys preserve all existing v2/v3 pet memory without migration.
 bool buzzerEnabled = BUZZER_ENABLED_DEFAULT;
-uint8_t buzzerVolume = BUZZER_VOLUME_DEFAULT;
 bool editBuzzerEnabled = BUZZER_ENABLED_DEFAULT;
-uint8_t editBuzzerVolume = BUZZER_VOLUME_DEFAULT;
 bool contrastInitialized = false;
 uint8_t lastAppliedContrast = 0;
 
-enum class SettingsView : uint8_t { LIST, BRIGHTNESS, AUTO_NIGHT, BUZZER_ENABLE, BUZZER_VOLUME, CLOCK, OWNER, MEMORY, RESET };
+enum class SettingsView : uint8_t { LIST, BRIGHTNESS, AUTO_NIGHT, BUZZER_ENABLE, CLOCK, OWNER, MEMORY, TEST_SECRETS, RESET };
 SettingsView settingsView = SettingsView::LIST;
 uint8_t settingsIndex = 0;
 uint8_t wardrobePreview = 0; // B tap browses; B long equips and saves
 bool resetArmed = false;
 const char* const SETTINGS_ITEMS[] = {
-  "Brightness", "Auto night", "Buzzer", "Sound level",
-  "Clock sync", "Pet owner", "Pet memory", "Factory reset"
+  "Brightness", "Auto night", "Buzzer", "Clock sync",
+  "Pet owner", "Pet memory", "Test secrets", "Factory reset"
 };
 const char* const SETTINGS_SUBTITLES[] = {
-  "OLED contrast", "22:00 to 07:00", "Cute sounds ON/OFF",
-  "Volume 0 to 4", "Internet time", "Saved pet owner",
-  "Saved progress", "Erase pet data"
+  "My little glow", "Dreamy night glow", "Cute jingles ON/OFF",
+  "My cozy time zone", "My favourite human",
+  "Our story is safe", "Peek at magic!", "A fresh new start"
 };
 constexpr uint8_t SETTINGS_COUNT = sizeof(SETTINGS_ITEMS)/sizeof(SETTINGS_ITEMS[0]);
+constexpr uint32_t CALENDAR_SHOW_MS=3000, WEATHER_SHOW_MS=3000, FEED_MS=4300;
+constexpr uint32_t HUNGER_INTERVAL_MS=300000; // ask every ~5 minutes
+constexpr uint32_t HUNGER_PROMPT_MS=30000;   // dismiss unfed request in 30 s
+constexpr uint32_t GREETING_SHOW_MS=5600;
+constexpr uint8_t SECRET_COUNT=7;
+enum SecretIndex:uint8_t { SEC_PEEK, SEC_BIRTHDAY, SEC_ALIEN, SEC_ANGEL,
+ SEC_GHOST, SEC_ROYAL, SEC_FRIEND };
+const char* const SECRET_NAMES[]={"PEEKABOO!","PIXO BIRTHDAY","ALIEN INVASION", "ANGEL MODE", "MIDNIGHT GHOST", "ROYAL PIXO", "BEST FRIEND"};
+const char* const SECRET_HINTS[][3]={
+ {"Press A + B", "Little hand surprise", "A cute sparkle"},
+ {"Birth anniversary", "Cake and confetti", "Every year"},
+ {"Very rare event", "After weeks of use", "One eye flies away"},
+ {"365 pet days", "Little halo+wings", "One year together"},
+ {"A + B at 00:00", "Until 00:15 IST", "A floating ghost"},
+ {"7,14,30,90,180,", "270 pet days", "A royal crown"},
+ {"365 pet days", "A bee stays nearby", "Forever friends"}
+};
+enum class SecretAnim:uint8_t{PEEK,ALIEN,ANGEL,GHOST,ROYAL,FRIEND};
+SecretAnim secretAnim=SecretAnim::PEEK;
+uint8_t secretPage=0,royalMilestoneSaved=0;
+bool secretTestMode=TEST_MODE_DEFAULT,editSecretTestMode=TEST_MODE_DEFAULT;
+uint32_t lastGreetingDate=0,lastAlienChecked=0,feedCount=0;
+bool dailyGreetingQueued=false, hungry=false, hungryFromSleep=false;
+uint32_t hungerAskedAt=0;
+uint32_t nextHungerAt=0;
+uint8_t foodChoice=0;
+uint32_t weatherDate=0;
+int weatherTemp10=0,weatherWind10=0,weatherCode=-1;
+bool weatherValid=false;
+bool pendingAlien=false,pendingRoyal=false,pendingAngel=false,pendingFriend=false;
 
 
-// ======================= PIXO SOUND ENGINE ===========================
-// Nonblocking: no delay() or tone() calls in the animation loop.
-// Each note is (frequency in Hz, duration in milliseconds). 0 Hz is a rest.
-// Uses LEDC PWM; duty changes the strength of a passive piezo's fundamental
-// tone, but this is NOT a calibrated acoustic dB/percentage volume control.
-struct PixoNote { uint16_t hz; uint16_t ms; };
 
-// Original little PIXO greeting: bouncy arpeggios plus a falling sparkle.
-const PixoNote STARTUP_TUNE[] = {
-  {659,105},{0,32},{784,125},{988,140},{0,45},
-  {1175,180},{988,105},{1319,260},{0,65},{1568,200},
-  {1319,140},{1175,240}
-};
-const PixoNote WAKE_TUNE[] = {
-  {784,75},{1047,80},{1319,95},{1568,155}
-};
-const PixoNote SLEEP_TUNE[] = {
-  {659,115},{587,155},{494,210},{392,280},{0,120}
-};
-// Occasional VERY soft sleeping purr. Only one short sound every 25-45 s.
-const PixoNote DREAM_TUNE[] = {{392,85},{0,50},{330,105}};
-const PixoNote BUTTON_A_TUNE[] = {{784,44},{587,52}};
-const PixoNote BUTTON_B_TUNE[] = {{988,52},{1319,68}};
-const PixoNote PET_TUNE[] = {{1319,58},{1568,78}};
-const PixoNote SECRET_TUNE[] = {{784,90},{988,95},{1175,95},{1568,240}};
-const PixoNote BIRTHDAY_TUNE[] = {
-  {784,115},{988,115},{1175,150},{0,80},
-  {1047,125},{1319,150},{1568,310}
-};
-// Original playful tune for the headphones animation, ~2.6 seconds.
-const PixoNote MUSIC_TUNE[] = {
-  {523,145},{659,145},{784,145},{1047,180},{0,70},
-  {988,155},{784,145},{659,145},{784,190},{0,65},
-  {587,140},{784,140},{988,180},{1175,260}
-};
-const PixoNote VOLUME_PREVIEW_TUNE[] = {{1047,105},{1319,150}};
-
-enum class SoundID : uint8_t {
-  NONE, STARTUP, WAKE, SLEEP, DREAM, BUTTON_A, BUTTON_B, PET,
-  MUSIC, SECRET, BIRTHDAY, PREVIEW
-};
-SoundID activeSound = SoundID::NONE;
-const PixoNote* activeNotes = nullptr;
-uint8_t activeNoteCount = 0;
-uint8_t activeNoteIndex = 0;
-uint32_t activeNoteBegan = 0;
-uint32_t nextDreamChirp = 0;
-bool buzzerReady = false;
-bool forceSoundPreview = false;
-// Volume steps are intentionally gentle. A passive piezo's loudness is not
-// linear in PWM duty; actual results vary by transducer and enclosure.
-const uint16_t SOUND_DUTY[] = {0, 22, 65, 145, 325};
-
-void buzzerPwmSet(uint16_t frequency, uint8_t volume) {
-  if(!buzzerReady) return;
-  if(frequency==0 || volume==0) {
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-    ledcWrite(BUZZER_PIN,0);
-#else
-    ledcWrite(BUZZER_LEDC_CHANNEL,0);
-#endif
-    return;
-  }
+// ====================== CUTE TONE ENGINE ============================
+// A passive piezo plays ORIGINAL little melodies with pitches near 220-520 Hz.
+// No volume setting: Sound ON/OFF only. An active buzzer cannot play pitches.
+// Non-blocking audio: no delay() inside sound playback.
+struct PixoNote {uint16_t hz;uint16_t ms;};
+const PixoNote STARTUP_TUNE[]={{262,175},{330,190},{392,200},{0,110},{440,230},{392,160},{523,360}};
+const PixoNote WAKE_TUNE[]={{262,95},{330,105},{392,135},{523,230}};
+const PixoNote SLEEP_TUNE[]={{330,190},{294,230},{262,280},{220,360}};
+const PixoNote DREAM_TUNE[]={{220,90},{0,90},{247,120}};
+const PixoNote BUTTON_A_TUNE[]={{277,45},{220,55}};
+const PixoNote BUTTON_B_TUNE[]={{330,60},{392,70}};
+const PixoNote PET_TUNE[]={{330,90},{392,110},{523,155}};
+const PixoNote MUSIC_TUNE[]={{330,140},{0,65},{392,135},{440,125},{392,150},{523,180},{0,80},{440,250}};
+const PixoNote FOOD_TUNE[]={{262,100},{330,100},{392,120},{523,180},{392,120},{523,245}};
+const PixoNote HUNGRY_TUNE[]={{330,180},{0,120},{294,230},{0,80},{262,240}};
+// Each secret has its own unmistakable original melody.
+const PixoNote PEEK_TUNE[]={{392,120},{0,110},{392,110},{0,180},{523,100},{659,180},{784,230}};
+const PixoNote ALIEN_TUNE[]={{220,130},{294,160},{247,145},{349,130},{233,160},{311,270},{0,90},{220,210}};
+const PixoNote ANGEL_TUNE[]={{330,230},{392,230},{523,280},{0,110},{587,270},{659,360},{523,220}};
+const PixoNote GHOST_TUNE[]={{294,330},{277,320},{247,310},{220,300},{0,200},{330,95},{0,70},{220,240}};
+const PixoNote ROYAL_TUNE[]={{262,160},{392,160},{523,210},{0,110},{392,155},{523,155},{659,380}};
+const PixoNote FRIEND_TUNE[]={{440,135},{523,135},{440,135},{392,130},{523,140},{659,245},{0,90},{523,220}};
+const PixoNote BIRTHDAY_TUNE[]={{262,140},{262,140},{294,220},{262,220},{349,240},{330,360},{0,120},{392,170},{349,170},{330,180},{523,350}};
+const PixoNote PREVIEW_TUNE[]={{330,100},{392,130}};
+enum class SoundID:uint8_t {NONE, STARTUP, WAKE, SLEEP, DREAM, BUTTON_A, BUTTON_B,
+  PET, MUSIC, SECRET, BIRTHDAY, PREVIEW, FOOD, HUNGRY};
+SoundID activeSound=SoundID::NONE;
+const PixoNote* activeNotes=nullptr;
+uint8_t activeNoteCount=0,activeNoteIndex=0;
+uint32_t activeNoteBegan=0,nextDreamChirp=0,nextSecretMelodyAt=0;
+bool buzzerReady=false,forceSoundPreview=false;
+void buzzerPwmSet(uint16_t frequency,uint8_t unused=0) {
+  if(!buzzerReady)return;
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
   ledcWriteTone(BUZZER_PIN,frequency);
-  ledcWrite(BUZZER_PIN,SOUND_DUTY[volume]);
 #else
   ledcWriteTone(BUZZER_LEDC_CHANNEL,frequency);
-  ledcWrite(BUZZER_LEDC_CHANNEL,SOUND_DUTY[volume]);
 #endif
 }
 void buzzerHalt() {
-  buzzerPwmSet(0,0);
-  activeSound=SoundID::NONE;
-  activeNotes=nullptr;
-  activeNoteCount=0;
-  forceSoundPreview=false;
+  buzzerPwmSet(0);activeSound=SoundID::NONE;activeNotes=nullptr;
+  activeNoteCount=0;forceSoundPreview=false;
 }
 void buzzerInit() {
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
-  buzzerReady=ledcAttach(BUZZER_PIN,1600,BUZZER_PWM_BITS);
+  buzzerReady=ledcAttach(BUZZER_PIN,BUZZER_FIXED_HZ,BUZZER_PWM_BITS);
 #else
-  ledcSetup(BUZZER_LEDC_CHANNEL,1600,BUZZER_PWM_BITS);
-  ledcAttachPin(BUZZER_PIN,BUZZER_LEDC_CHANNEL);
-  buzzerReady=true;
+  ledcSetup(BUZZER_LEDC_CHANNEL,BUZZER_FIXED_HZ,BUZZER_PWM_BITS);
+  ledcAttachPin(BUZZER_PIN,BUZZER_LEDC_CHANNEL);buzzerReady=true;
 #endif
-  buzzerPwmSet(0,0);
-  if(!buzzerReady) Serial.println(F("PIXO: buzzer PWM setup failed"));
+  buzzerPwmSet(0);
 }
 void buzzerPlay(SoundID id,uint32_t now,bool preview=false) {
-  if(!buzzerReady || ((!buzzerEnabled || buzzerVolume==0) && !preview)) return;
-  if(preview && (!editBuzzerEnabled || editBuzzerVolume==0)) {
-    buzzerHalt();return;
-  }
+  if(!buzzerReady || (!buzzerEnabled&&!preview) || (preview&&!editBuzzerEnabled))return;
   switch(id) {
     case SoundID::STARTUP: activeNotes=STARTUP_TUNE;activeNoteCount=sizeof(STARTUP_TUNE)/sizeof(PixoNote);break;
     case SoundID::WAKE: activeNotes=WAKE_TUNE;activeNoteCount=sizeof(WAKE_TUNE)/sizeof(PixoNote);break;
@@ -428,37 +363,37 @@ void buzzerPlay(SoundID id,uint32_t now,bool preview=false) {
     case SoundID::BUTTON_B: activeNotes=BUTTON_B_TUNE;activeNoteCount=sizeof(BUTTON_B_TUNE)/sizeof(PixoNote);break;
     case SoundID::PET: activeNotes=PET_TUNE;activeNoteCount=sizeof(PET_TUNE)/sizeof(PixoNote);break;
     case SoundID::MUSIC: activeNotes=MUSIC_TUNE;activeNoteCount=sizeof(MUSIC_TUNE)/sizeof(PixoNote);break;
-    case SoundID::SECRET: activeNotes=SECRET_TUNE;activeNoteCount=sizeof(SECRET_TUNE)/sizeof(PixoNote);break;
     case SoundID::BIRTHDAY: activeNotes=BIRTHDAY_TUNE;activeNoteCount=sizeof(BIRTHDAY_TUNE)/sizeof(PixoNote);break;
-    case SoundID::PREVIEW: activeNotes=VOLUME_PREVIEW_TUNE;activeNoteCount=sizeof(VOLUME_PREVIEW_TUNE)/sizeof(PixoNote);break;
-    default: buzzerHalt();return;
+    case SoundID::FOOD: activeNotes=FOOD_TUNE;activeNoteCount=sizeof(FOOD_TUNE)/sizeof(PixoNote);break;
+    case SoundID::HUNGRY: activeNotes=HUNGRY_TUNE;activeNoteCount=sizeof(HUNGRY_TUNE)/sizeof(PixoNote);break;
+    case SoundID::SECRET:
+      switch(secretAnim){
+        case SecretAnim::PEEK: activeNotes=PEEK_TUNE;activeNoteCount=sizeof(PEEK_TUNE)/sizeof(PixoNote);break;
+        case SecretAnim::ALIEN: activeNotes=ALIEN_TUNE;activeNoteCount=sizeof(ALIEN_TUNE)/sizeof(PixoNote);break;
+        case SecretAnim::ANGEL: activeNotes=ANGEL_TUNE;activeNoteCount=sizeof(ANGEL_TUNE)/sizeof(PixoNote);break;
+        case SecretAnim::GHOST: activeNotes=GHOST_TUNE;activeNoteCount=sizeof(GHOST_TUNE)/sizeof(PixoNote);break;
+        case SecretAnim::ROYAL: activeNotes=ROYAL_TUNE;activeNoteCount=sizeof(ROYAL_TUNE)/sizeof(PixoNote);break;
+        case SecretAnim::FRIEND: activeNotes=FRIEND_TUNE;activeNoteCount=sizeof(FRIEND_TUNE)/sizeof(PixoNote);break;
+      }
+      break;
+    default: activeNotes=PREVIEW_TUNE;activeNoteCount=sizeof(PREVIEW_TUNE)/sizeof(PixoNote);break;
   }
-  activeSound=id;
-  activeNoteIndex=0;
-  activeNoteBegan=now;
-  forceSoundPreview=preview;
-  buzzerPwmSet(activeNotes[0].hz,id==SoundID::DREAM ? 1 :
-               (preview?editBuzzerVolume:buzzerVolume));
+  activeSound=id;activeNoteIndex=0;activeNoteBegan=now;forceSoundPreview=preview;
+  buzzerPwmSet(activeNotes[0].hz);
 }
 void buzzerUpdate(uint32_t now) {
-  if(activeSound==SoundID::NONE) return;
-  if(!forceSoundPreview && (!buzzerEnabled || buzzerVolume==0)) {
-    buzzerHalt();return;
-  }
-  if(forceSoundPreview && (!editBuzzerEnabled || editBuzzerVolume==0)) {
-    buzzerHalt();return;
-  }
-  // Advance with bounded work; keeps eye animations, Wi-Fi and buttons live.
-  if(now-activeNoteBegan>=activeNotes[activeNoteIndex].ms) {
-    ++activeNoteIndex;
-    if(activeNoteIndex>=activeNoteCount) {buzzerHalt();return;}
-    activeNoteBegan=now;
-    buzzerPwmSet(activeNotes[activeNoteIndex].hz,activeSound==SoundID::DREAM ? 1 :
-                 (forceSoundPreview?editBuzzerVolume:buzzerVolume));
+  if(activeSound==SoundID::NONE)return;
+  if(!forceSoundPreview&&!buzzerEnabled){buzzerHalt();return;}
+  // Catch up if an I2C frame took longer than one short musical note.
+  while(activeSound!=SoundID::NONE &&
+        now-activeNoteBegan>=activeNotes[activeNoteIndex].ms) {
+    activeNoteBegan+=activeNotes[activeNoteIndex].ms;
+    if(++activeNoteIndex>=activeNoteCount){buzzerHalt();return;}
+    buzzerPwmSet(activeNotes[activeNoteIndex].hz);
   }
 }
 
-bool inSettingsDetail() {return state==State::MENU && menuDetail && menuIndex==5;}
+bool inSettingsDetail() {return state==State::MENU && menuDetail && menuIndex==6;}
 // Saved contrast always returns after exiting preview; night mode only works
 // if a valid internet time was received during this power session.
 bool isNightTime() {
@@ -488,10 +423,7 @@ void loadDisplayPreferences() {
   editBrightnessLevel=savedBrightnessLevel;
   editAutoNightMode=autoNightMode;
   buzzerEnabled=petPrefs.getBool("sndon",BUZZER_ENABLED_DEFAULT);
-  buzzerVolume=petPrefs.getUChar("sndvol",BUZZER_VOLUME_DEFAULT);
-  if(buzzerVolume>BUZZER_MAX_VOLUME) buzzerVolume=BUZZER_VOLUME_DEFAULT;
   editBuzzerEnabled=buzzerEnabled;
-  editBuzzerVolume=buzzerVolume;
 }
 
 
@@ -558,6 +490,17 @@ void loadPetMemory() {
     petPrefs.putString("owner",savedOwner);
   savePetIfNeeded(millis(),true);
   loadDisplayPreferences();
+  secretTestMode=petPrefs.getBool("testsec",TEST_MODE_DEFAULT);
+  editSecretTestMode=secretTestMode;
+  lastGreetingDate=petPrefs.getUInt("greetday",0);
+  lastAlienChecked=petPrefs.getUInt("alienchk",0);
+  royalMilestoneSaved=petPrefs.getUChar("royalm",0);
+  feedCount=petPrefs.getUInt("feeds",0);
+  weatherDate=petPrefs.getUInt("wxdate",0);
+  weatherTemp10=petPrefs.getInt("wxtemp",0);
+  weatherWind10=petPrefs.getInt("wxwind",0);
+  weatherCode=petPrefs.getInt("wxcode",-1);
+  weatherValid=weatherDate!=0 && weatherCode>=0;
 }
 void notePlayedToday() {
   if (!clockSynced) return;
@@ -622,27 +565,107 @@ void onClockReady() {
     anniversaryQueued=true;
     // Record before animation so a reboot won't repeat it endlessly.
     pet.lastBirthdayShownYmd=today;
-    pet.secrets |= (1U<<1); // hidden birthday badge
+    pet.secrets |= (1U<<SEC_BIRTHDAY); // birthday badge
     markPetDirty();
     savePetIfNeeded(millis(),true);
   }
 }
 
 
+void checkSecretMilestones();
 void checkPetDateDuringRuntime(uint32_t now) {
   // Catch a birthday at midnight even when PIXO has stayed powered on.
   if(!clockSynced || now-lastValidDateCheck < 60000) return;
   lastValidDateCheck=now;
   uint32_t today=currentLocalDate();
+  checkSecretMilestones();
   if(isAnniversary(today) && pet.lastBirthdayShownYmd!=today) {
     anniversaryQueued=true;
     pet.lastBirthdayShownYmd=today;
-    pet.secrets |= (1U<<1);
+    pet.secrets |= (1U<<SEC_BIRTHDAY);
     markPetDirty();
     savePetIfNeeded(now,true);
   }
 }
 
+bool isMidnightWindow() {
+ if(!clockSynced)return false;
+ time_t raw=time(nullptr);tm local;
+ if(!localtime_r(&raw,&local))return false;
+ return local.tm_hour==0 && local.tm_min<15;
+}
+// Secret days are based on the original birth date, not time powered on.
+void checkSecretMilestones() {
+ if(!clockSynced||!pet.birthYmd)return;
+ uint32_t age=petAgeDays();
+ const uint16_t royalDays[]={7,14,30,90,180,270};
+ uint8_t reachedCount=0;
+ for(uint8_t i=0;i<6;i++)if(age>=royalDays[i])reachedCount=i+1;
+ if(reachedCount>royalMilestoneSaved) {
+   royalMilestoneSaved=reachedCount;petPrefs.putUChar("royalm",royalMilestoneSaved);
+   pet.secrets|=(1U<<SEC_ROYAL);markPetDirty();pendingRoyal=true;
+ }
+ if(age>=365) {
+   if(!(pet.secrets&(1U<<SEC_ANGEL))) {
+     pet.secrets|=(1U<<SEC_ANGEL);markPetDirty();pendingAngel=true;
+   }
+   if(!(pet.secrets&(1U<<SEC_FRIEND))) {
+     pet.secrets|=(1U<<SEC_FRIEND);markPetDirty();pendingFriend=true;
+   }
+ }
+ uint32_t today=currentLocalDate();
+ if(age>=21 && today && today!=lastAlienChecked && !(pet.secrets&(1U<<SEC_ALIEN))) {
+   lastAlienChecked=today;petPrefs.putUInt("alienchk",today);
+   if(random(22)==0){pet.secrets|=(1U<<SEC_ALIEN);markPetDirty();pendingAlien=true;}
+ }
+}
+void checkDailyGreeting() {
+ if(!clockSynced)return;
+ uint32_t today=currentLocalDate();
+ if(today && today!=lastGreetingDate)dailyGreetingQueued=true;
+}
+void markDailyGreetingShown() {
+ uint32_t today=currentLocalDate();
+ if(today){lastGreetingDate=today;petPrefs.putUInt("greetday",today);}
+ dailyGreetingQueued=false;
+}
+const char* weatherLabel(int c) {
+ if(c<0)return "NO WEATHER";
+ if(c==0)return "CLEAR SKIES";
+ if(c<=3)return "PARTLY CLOUDY";
+ if(c==45||c==48)return "MISTY";
+ if(c>=51&&c<=67)return "RAINY DAY";
+ if(c>=71&&c<=77)return "SNOW";
+ if(c>=80&&c<=82)return "SHOWERS";
+ if(c>=95)return "THUNDER";
+ return "CLOUDY";
+}
+void setState(State next,uint32_t now);
+void startSecretAnimation(SecretAnim which,uint32_t now,bool unlock=true) {
+ secretAnim=which;
+ // Only genuine unlocks set permanent flags; test preview doesn't age PIXO.
+ if(unlock) {
+   switch(which){
+     case SecretAnim::PEEK:pet.secrets|=(1U<<SEC_PEEK);break;
+     case SecretAnim::GHOST:pet.secrets|=(1U<<SEC_GHOST);break;
+     default:break;
+   }
+   markPetDirty();savePetIfNeeded(now,true);
+ }
+ setState(State::SECRET_REACTION,now);
+ nextSecretMelodyAt=now+3800;
+}
+void startFeeding(uint32_t now) {
+ hungry=false;foodChoice=(uint8_t)random(3);
+ nextHungerAt=now+HUNGER_INTERVAL_MS;
+ hungryFromSleep=false;lastInteraction=now;
+ if(feedCount<UINT32_MAX)++feedCount;
+ petPrefs.putUInt("feeds",feedCount);
+ pet.affection=(uint16_t)min(100,(int)pet.affection+3);
+ markPetDirty();notePlayedToday();savePetIfNeeded(now,true);
+ setState(State::FEEDING,now);
+ buzzerPlay(SoundID::FOOD,now);
+}
 struct HeartBurst {
   uint32_t began = 0;
   bool valid = false;
@@ -1160,24 +1183,36 @@ void drawAccessoryOverlay(int accessory) {
 }
 
 void drawBirthday(uint32_t dt) {
-  // Two surprised eyes + cake with candle + confetti, without a mouth.
-  float hop=fabsf(sinf(dt*.009f))*3;
-  oneEye(34,36-(int)hop,.80f,-1);
-  oneEye(94,36-(int)hop,.80f,1);
-  display.drawRoundRect(52,39,24,13,3,SSD1306_WHITE);
-  display.fillRect(54,45,20,5,SSD1306_WHITE);
-  display.drawFastHLine(51,39,26,SSD1306_WHITE);
-  display.drawFastVLine(64,32,7,SSD1306_WHITE);
-  display.fillCircle(64,29+(int)(2*sinf(dt*.019f)),2,SSD1306_WHITE);
+  // A complete little birthday party, paced over 14.6 seconds.
+  uint32_t scene=(dt/3500UL)%4;
+  float bounce=3*fabsf(sinf(dt*.007f));
+  oneEye(34,35-(int)bounce,.85f,-1);
+  oneEye(94,35-(int)bounce,.85f,1);
   display.setTextSize(1);
-  display.setCursor(21,2);display.print(F("HAPPY BIRTHDAY!"));
-  if((dt/220)%2==0) {tinySparkle(14,23,3); tinySparkle(112,19,3);}
-  for(int i=0;i<9;i++) {
-    int x=(i*41+11)%122+3;
-    int y=((int)(dt/13)+(i*23))%63;
-    display.drawPixel(x,y,SSD1306_WHITE);
+  display.setCursor(16,2);display.print(F("HAPPY PIXO DAY!"));
+  int cakeY=scene==0 ? 60-(int)(26*ease(progress(dt,1500))) : 34;
+  // Decorated two-layer cake with frosting, candle and animated flame.
+  display.drawRoundRect(51,cakeY+9,27,15,3,SSD1306_WHITE);
+  display.fillRect(53,cakeY+20,23,3,SSD1306_WHITE);
+  display.drawFastHLine(51,cakeY+14,27,SSD1306_WHITE);
+  for(int i=0;i<4;i++)display.drawPixel(55+i*6,cakeY+16,SSD1306_WHITE);
+  display.drawFastVLine(64,cakeY+3,7,SSD1306_WHITE);
+  if(dt<6500)display.fillCircle(64,cakeY+1+(int)sinf(dt*.014f),2,SSD1306_WHITE);
+  else if(dt<8200){display.drawCircle(65+(int)((dt-6500)/150),cakeY-1-(int)((dt-6500)/320),2,SSD1306_WHITE);}
+  if(dt>7100)for(int i=0;i<14;i++){
+    int x=(i*37+9+(int)(dt/30))%128;
+    int y=(int)((dt/17+i*17)%64);
+    if(i%2)display.drawLine(x,y,x+2,y,SSD1306_WHITE);
+    else tinySparkle(x,y,2);
   }
-  display.setCursor(43,55);display.print(F("PIXO  <3"));
+  display.fillRect(0,55,128,9,SSD1306_BLACK);
+  display.setCursor(scene==0?31:scene==1?16:scene==2?25:17,56);
+  switch(scene) {
+    case 0: display.print(F("MAKE A WISH!"));break;
+    case 1: display.print(F("BLOW THE CANDLE!"));break;
+    case 2: display.print(F("YAY! CONFETTI!"));break;
+    default: display.print(F("LOVE YOU LOTS!"));break;
+  }
 }
 void drawSecret(uint32_t dt) {
   drawStarry(dt);
@@ -1191,7 +1226,7 @@ void drawSecret(uint32_t dt) {
 }
 void drawIntroHello(uint32_t dt) {
   display.setTextSize(1);
-  display.setCursor(24,4);display.print(F("Hi, I'm your"));
+  display.setCursor(20,4);display.print(F("Hii! I'm your"));
   display.setCursor(12,17);display.print(F("digital pet PIXO!"));
   int bounce=(int)roundf(3*fabsf(sinf(dt*.009f)));
   oneEye(LEFT_EYE_X,45-bounce,0.75f,-2);
@@ -1206,16 +1241,16 @@ void fmtDate(char* out,size_t n,uint32_t ymd) {
 void drawIntroProfile(uint32_t dt) {
   display.drawRoundRect(2,1,124,62,5,SSD1306_WHITE);
   display.setTextSize(1);
-  display.setCursor(8,6);display.print(F("PIXO  /  MY DAY"));
+  display.setCursor(8,6);display.print(F("PIXO / OUR STORY"));
   display.drawFastHLine(10,17,108,SSD1306_WHITE);
   char d[18];fmtDate(d,sizeof(d),pet.birthYmd);
-  display.setCursor(11,24);display.print(F("Born: "));display.print(d);
-  display.setCursor(11,36);display.print(F("Age: "));
+  display.setCursor(11,24);display.print(F("B-day: "));display.print(d);
+  display.setCursor(11,36);display.print(F("I'm "));
   if(clockSynced && pet.birthYmd) {
-    display.print((unsigned long)petAgeDays());display.print(F(" days"));
+    display.print((unsigned long)petAgeDays());display.print(F(" days!"));
   } else display.print(F("Waiting for time"));
-  display.setCursor(11,49);display.print(F("Owner: "));
-  display.print(savedOwner.substring(0,12));
+  display.setCursor(11,49);display.print(F("My human: "));
+  display.print(savedOwner.substring(0,8));
   if((dt/200)%2==0) tinySparkle(113,49,2);
 }
 
@@ -1236,12 +1271,11 @@ void drawCalendar(uint32_t now) {
   display.drawRoundRect(1,1,126,62,6,SSD1306_WHITE);
   display.drawFastHLine(8,15,112,SSD1306_WHITE);
   display.setTextSize(1);
-  display.setCursor(9,5);display.print(F("PIXO"));
-  display.setCursor(67,5);display.print(F("KYO / TODAY"));
+  display.setCursor(10,5);display.print(F("BANGALORE / TODAY"));
   time_t raw=time(nullptr);
   if (!clockSynced || raw < (time_t)1700000000) {
-    display.setCursor(13,23);display.print(F("TIME NOT SYNCED"));
-    display.setCursor(13,39);display.print(F("SET WIFI ABOVE"));
+    display.setCursor(13,23);display.print(F("CLOCK IS SLEEPY!"));
+    display.setCursor(13,39);display.print(F("WiFi will fix it!"));
     drawSakura(110,38,5);
     return;
   }
@@ -1266,6 +1300,210 @@ void drawCalendar(uint32_t now) {
   if ((now/700)%2==0) tinySparkle(117,52,2);
 }
 
+void uiHeader(const char*,uint8_t,const char*);
+void uiLabel(int,int,const char*);
+void uiValue(int,int,const String&);
+void drawWeather(uint32_t now) {
+ uiHeader("BANGALORE",7,"TODAY");
+ uint32_t today=clockSynced?currentLocalDate():0;
+ if(!weatherValid||weatherDate!=today) {
+   uiLabel(8,24,"CLOUDS ARE SHY!");
+   uiLabel(8,39,"WiFi next time <3");
+ } else {
+   char temp[20];snprintf(temp,sizeof(temp),"%d.%d C",weatherTemp10/10,abs(weatherTemp10%10));
+   uiValue(9,20,temp);
+   uiLabel(9,42,weatherLabel(weatherCode));
+   char wind[24];snprintf(wind,sizeof(wind),"WIND %d km/h",weatherWind10/10);
+   uiLabel(9,53,wind);
+ }
+}
+void drawDailyGreeting(uint32_t dt) {
+ uiHeader("HI, MY HUMAN!",0,"<3");
+ time_t raw=time(nullptr);tm t;
+ bool valid=clockSynced&&localtime_r(&raw,&t);
+ int hour=valid?t.tm_hour:12;
+ const char* hello=hour<12?"MORNING, SUNBEAM!":hour<17?"HEYA, SUNSHINE!":hour<21?"COZY EVENING!":"SWEET DREAM TIME!";
+ uiLabel(7,18,hello);
+ display.setTextSize(1);
+ display.setCursor(7,29);display.print(F("Hi "));display.print(savedOwner.substring(0,13));display.print(F("!"));
+ const char* msg[]={"My lucky star <3","Tiny hugs for you!","Let's smile!","Today is our day <3","You make me happy!","Big love, tiny PIXO!"};
+ uint32_t day=currentLocalDate();
+ uiLabel(7,44,msg[day%6]);
+ if((dt/220)%2)tinyHeart(113,43,4);
+ display.drawFastHLine(7,57,110,SSD1306_WHITE);
+ display.fillRect(7,57,(int)(110*progress(dt,GREETING_SHOW_MS)),2,SSD1306_WHITE);
+}
+void drawPeekaboo(uint32_t dt) {
+  // Three complete hand-cover / surprise / giggle cycles.
+  uint32_t cycle=dt%4000UL;
+  if(cycle<1550){
+    eyes(.88f,0,0,0);
+    for(int i=0;i<2;++i){
+      int x=i?RIGHT_EYE_X:LEFT_EYE_X;
+      int down=(int)(12*ease(progress(cycle,390)));
+      display.fillRoundRect(x-18,5+down,36,28,7,SSD1306_WHITE);
+      for(int f=0;f<4;f++)display.drawLine(x-14+f*8,7+down,x-14+f*8,27+down,SSD1306_BLACK);
+    }
+    uiLabel(43,55,"SHHH... <3");
+  } else {
+    uint32_t popped=cycle-1550;
+    float pop=ease(progress(popped,240));
+    eyes(.46f+.54f*pop,0,0,(int)(-2*sinf(popped*.012f)),pop);
+    tinySparkle(12,12,4);tinySparkle(116,16,4);
+    if((cycle/200)%2) {tinyHeart(64,7,4);tinySparkle(63,26,3);}
+    uiLabel(34,55,popped<1000?"PEEKABOO!":"HEHE~ GOTCHA!");
+  }
+}
+void drawSecretEvent(uint32_t dt) {
+ // Entire 12.55-second Easter egg is animated, not a held last frame.
+ switch(secretAnim){
+   case SecretAnim::PEEK: drawPeekaboo(dt);break;
+   case SecretAnim::ALIEN: {
+     int ufoX=dt<2200?mixInt(-18,64,ease(progress(dt,2200))):
+              (dt>10000?mixInt(64,155,ease(progress(dt-10000,2400))):64);
+     int xo=LEFT_EYE_X,yo=32;
+     bool abducting=dt>=2500&&dt<7600;
+     if(abducting){
+       int lift=dt<5200?(int)(23*ease(progress(dt-2500,2700))):
+                (int)(23*(1-ease(progress(dt-5200,2400))));
+       yo-=lift;xo+=(int)(15*sinf(dt*.012f));
+     }
+     if(abducting){oneEye(RIGHT_EYE_X,32,.9f,1);oneEye(xo,yo,.9f,-1);}
+     else eyes(.92f,0,0,0);
+     display.drawRoundRect(ufoX-16,3,32,9,4,SSD1306_WHITE);
+     display.drawFastHLine(ufoX-21,13,42,SSD1306_WHITE);
+     display.drawCircle(ufoX,3,4,SSD1306_WHITE);
+     if(abducting){display.drawLine(ufoX,15,xo,yo-12,SSD1306_WHITE);}
+     if(dt>7600 && dt<9700){
+       display.drawCircle(LEFT_EYE_X,32,20,SSD1306_WHITE);
+       display.drawFastVLine(LEFT_EYE_X,20,24,SSD1306_BLACK);
+       tinySparkle(LEFT_EYE_X,10,3);
+     }
+     uiLabel(22,55,dt<2500?"HI, SPACE BUDDY!":dt<7600?"HEY! MY EYE!":dt<10000?"UPSIDE DOWN?!":"PHEW! I'M BACK!");
+     break;
+   }
+   case SecretAnim::ANGEL: {
+     eyes(.84f,0,0,(int)(2*sinf(dt*.005f)));
+     int flap=(int)(8*fabsf(sinf(dt*.006f)));
+     display.drawRoundRect(48,2+(int)(2*sinf(dt*.005f)),33,6,3,SSD1306_WHITE);
+     display.drawLine(22,30,5,9+flap,SSD1306_WHITE);
+     display.drawLine(5,9+flap,13,43,SSD1306_WHITE);
+     display.drawLine(13,43,22,30,SSD1306_WHITE);
+     display.drawLine(106,30,123,9+flap,SSD1306_WHITE);
+     display.drawLine(123,9+flap,115,43,SSD1306_WHITE);
+     display.drawLine(115,43,106,30,SSD1306_WHITE);
+     display.drawLine(21,31,8,23+flap,SSD1306_WHITE);
+     display.drawLine(107,31,120,23+flap,SSD1306_WHITE);
+     if((dt/220)%2==0){tinySparkle(15,48,4);tinySparkle(112,47,3);}
+     uiLabel(24,55,dt<5000?"LOOK! TINY WINGS!":"FLY WITH ME~ <3");break;
+   }
+   case SecretAnim::GHOST: {
+     int x=(int)(-25+((dt*177UL)/SECRET_CELEBRATE_MS));
+     bool hiding=dt>=2400&&dt<7900;
+     eyes(hiding?.18f:.85f,0,0,hiding?11:0);
+     display.fillRoundRect(x,5+(int)(4*sinf(dt*.004f)),16,19,7,SSD1306_WHITE);
+     display.drawPixel(x+5,15,SSD1306_BLACK);display.drawPixel(x+11,15,SSD1306_BLACK);
+     if(dt>7800)tinySparkle(110,13,4);
+     uiLabel(25,55,hiding?"IS IT GONE...?":"BOO! JUST KIDDING!");break;
+   }
+   case SecretAnim::ROYAL: {
+     drawStarry(dt);
+     int y=dt<2400?mixInt(-16,3,ease(progress(dt,2400))):
+       3+(int)(2*sinf(dt*.006f));
+     display.fillTriangle(48,y+9,53,y,59,y+9,SSD1306_WHITE);
+     display.fillTriangle(58,y+9,64,y-2,70,y+9,SSD1306_WHITE);
+     display.fillTriangle(69,y+9,75,y,80,y+9,SSD1306_WHITE);
+     display.fillRect(48,y+9,32,4,SSD1306_WHITE);
+     if(dt>2500 && (dt/180)%2){tinySparkle(14,18,4);tinySparkle(115,19,4);}
+     display.fillRect(0,54,128,10,SSD1306_BLACK);
+     uiLabel(26,55,dt<2800?"YOUR MAJESTY!":"ROYAL PIXO <3");break;
+   }
+   case SecretAnim::FRIEND: {
+     eyes(.9f,0,0,(int)(2*sinf(dt*.005f)));
+     float t=ease(progress(dt,2600));
+     int x=mixInt(142,108,t)+(int)(10*sinf(dt*.007f));
+     int y=13+(int)(8*sinf(dt*.008f));
+     display.fillCircle(x,y,5,SSD1306_WHITE);
+     display.drawCircle(x-5,y-5,3,SSD1306_WHITE);
+     display.drawCircle(x+5,y-5,3,SSD1306_WHITE);
+     display.drawFastHLine(x-3,y,6,SSD1306_BLACK);
+     if(dt>3400){tinyHeart(61,8+(int)(3*sinf(dt*.005f)),4);tinySparkle(92,15,3);}
+     uiLabel(23,55,dt<3200?"WHO'S THAT?!":"MEET MY NEW BESTIE!");break;
+   }
+ }
+}
+void drawBeeFriend(uint32_t now) {
+ int y=6+(int)(2*sinf(now*.005f));
+ display.fillCircle(116,y,4,SSD1306_WHITE);
+ display.drawCircle(111,y-5,3,SSD1306_WHITE);
+ display.drawCircle(120,y-5,3,SSD1306_WHITE);
+ display.drawPixel(115,y,SSD1306_BLACK);
+}
+void drawCuteStrawberry(int x,int y,uint32_t dt) {
+  // Plump red-berry silhouette in monochrome with true leafy top and seeds.
+  display.fillCircle(x-7,y-2,7,SSD1306_WHITE);
+  display.fillCircle(x+7,y-2,7,SSD1306_WHITE);
+  display.fillTriangle(x-13,y,x,y+20,x+13,y,SSD1306_WHITE);
+  display.fillTriangle(x-10,y-11,x-3,y-3,x-1,y-11,SSD1306_WHITE);
+  display.fillTriangle(x+1,y-12,x+3,y-3,x+11,y-11,SSD1306_WHITE);
+  display.drawFastVLine(x,y-15,6,SSD1306_WHITE);
+  for(int i=0;i<6;i++) {
+    int sx=x-8+(i%3)*8,sy=y+1+(i/3)*7;
+    display.drawPixel(sx,sy,SSD1306_BLACK);
+    display.drawPixel(sx+1,sy+1,SSD1306_BLACK);
+  }
+  if((dt/220)%2)tinySparkle(x+17,y-8,2);
+}
+void drawCuteJuice(int x,int y,uint32_t dt) {
+  display.drawRoundRect(x-12,y-7,24,28,4,SSD1306_WHITE);
+  display.drawFastHLine(x-10,y+1,20,SSD1306_WHITE);
+  display.fillRect(x-10,y+3,20,15,SSD1306_WHITE);
+  display.drawLine(x+5,y-7,x+11,y-17,SSD1306_WHITE);
+  display.drawLine(x+11,y-17,x+15,y-17,SSD1306_WHITE);
+  display.drawFastHLine(x-14,y-9,28,SSD1306_WHITE);
+  display.drawCircle(x-3,y+9,2,SSD1306_BLACK);
+  display.drawCircle(x+5,y+14,2,SSD1306_BLACK);
+  display.drawCircle(x+16,y+1-(int)(dt/500)%7,2,SSD1306_WHITE);
+}
+void drawCuteCake(int x,int y,uint32_t dt) {
+  display.fillRoundRect(x-16,y-2,32,18,3,SSD1306_WHITE);
+  display.fillRect(x-16,y+5,32,5,SSD1306_BLACK);
+  display.drawFastHLine(x-18,y-5,36,SSD1306_WHITE);
+  for(int i=0;i<4;i++)display.fillCircle(x-13+i*9,y-5,3,SSD1306_WHITE);
+  display.drawFastVLine(x,y-12,7,SSD1306_WHITE);
+  display.fillCircle(x,y-15+(int)sinf(dt*.016f),2,SSD1306_WHITE);
+  display.drawPixel(x-7,y+13,SSD1306_BLACK);
+  display.drawPixel(x+7,y+13,SSD1306_BLACK);
+}
+void drawFeeding(uint32_t dt) {
+  // Four acts: reveal, fly up, cute bites, gratitude.
+  display.setTextSize(1);
+  display.setCursor(4,1);
+  display.print(dt<1200?F("OH! FOR ME? <3"):dt<2800?F("NOM NOM NOM!"):F("YUMMY! THANK U!"));
+  int bob=(int)(3*fabsf(sinf(dt*.012f)));
+  eyes(.80f+(dt>2800?.13f:0),0,0,bob-1);
+  drawBlush();
+  int fx=64+(int)(7*sinf(dt*.005f));
+  int fy=dt<1200?mixInt(60,37,ease(progress(dt,1200))):37;
+  bool eaten=dt>2650;
+  if(!eaten){
+    if(foodChoice==0)drawCuteStrawberry(fx,fy,dt);
+    else if(foodChoice==1)drawCuteJuice(fx,fy,dt);
+    else drawCuteCake(fx,fy,dt);
+    if(dt>1500){
+      // Bitten-food visual, not an added mouth on PIXO's face.
+      display.fillCircle(fx+12,fy+9,4,SSD1306_BLACK);
+      display.fillCircle(fx+10,fy+5,3,SSD1306_BLACK);
+    }
+  } else {
+    tinyHeart(64,25-(int)(4*sinf(dt*.008f)),5);
+    tinySparkle(28,30,4);tinySparkle(100,27,4);
+  }
+  display.fillRect(0,55,128,9,SSD1306_BLACK);
+  display.setTextSize(1);display.setCursor(18,56);
+  if(dt<2500)display.print(foodChoice==0?F("SWEET BERRY!"):foodChoice==1?F("SIPPY JUICE!"):F("YUMMY CAKE!"));
+  else {display.print(F("LOVE YOU, "));display.print(savedOwner.substring(0,7));}
+}
 // ====================== POLISHED 128x64 OLED MENU =====================
 // Layout hierarchy: large selected item, tiny context/description,
 // inverse-colour header, consistently sized footer and small pictograms.
@@ -1364,39 +1602,39 @@ void drawMyPixoDetail() {
   uiHeader("MY PIXO",cardIcon,page);
   char tmp[30];
   if(menuPage==0) {
-    uiLabel(5,17,"AGE  /  LITTLE COMPANION");
+    uiLabel(5,17,"MY LITTLE LIFE <3");
     if(clockSynced && pet.birthYmd) {
       snprintf(tmp,sizeof(tmp),"%lu days",(unsigned long)petAgeDays());
       uiValue(5,28,tmp);
-    } else uiValue(5,28,"No clock");
+    } else uiValue(5,28,"No time yet");
     char dob[18];fmtDate(dob,sizeof(dob),pet.birthYmd);
     uiLabel(5,45,"BORN");uiLabel(36,45,dob);
   } else if(menuPage==1) {
-    uiLabel(5,17,"LOVE  /  AFFECTION");
+    uiLabel(5,17,"ALL MY LOVE FOR YOU");
     snprintf(tmp,sizeof(tmp),"%u / 100",(unsigned)pet.affection);
     uiValue(5,28,tmp);
     uiMiniBar(5,46,113,(uint8_t)pet.affection,100);
     // Total pets available on next card as a large number.
   } else if(menuPage==2) {
-    uiLabel(5,17,"TOTAL PETTING COUNT");
+    uiLabel(5,17,"TOTAL LITTLE PETS");
     snprintf(tmp,sizeof(tmp),"%lu",(unsigned long)pet.totalPets);uiValue(5,28,tmp);
     uiLabel(5,45,"MOOD");uiLabel(43,45,PERSONALITIES[pet.personality%5]);
   } else if(menuPage==3) {
-    uiLabel(5,17,"GROWTH / OUTFIT");
+    uiLabel(5,17,"GROWING UP SO FAST!");
     uiValue(5,28,growthStage());
     uiLabel(5,45,"WEAR:");uiLabel(42,45,ACCESSORIES[pet.accessory]);
   } else if(menuPage==4) {
-    uiLabel(5,17,"DAY STREAK / SECRETS");
+    uiLabel(5,17,"OUR DAYS / TREASURES");
     snprintf(tmp,sizeof(tmp),"%u days",(unsigned)pet.dayStreak);uiValue(5,28,tmp);
     snprintf(tmp,sizeof(tmp),"UNLOCKED EASTER EGGS: %u",(unsigned)unlockedCount());
     uiLabel(5,45,tmp);
   } else if(menuPage==5) {
-    uiLabel(5,17,"LAST INTERACTION");
+    uiLabel(5,17,"LAST PLAY DAY <3");
     char last[18];fmtDate(last,sizeof(last),pet.lastPlayedYmd);
     uiValue(5,28,last);
-    uiLabel(5,45,"Last day you played");
+    uiLabel(5,45,"Miss you already!");
   } else {
-    uiLabel(5,17,"PET OWNER");
+    uiLabel(5,17,"MY FAVE HUMAN");
     uiValue(5,28,savedOwner);
     uiLabel(5,45,"FAV:");uiLabel(32,45,favouriteReaction());
   }
@@ -1420,58 +1658,57 @@ void drawSettingsPage(uint32_t now) {
   if(settingsView==SettingsView::LIST) {drawSettingsList();return;}
   if(settingsView==SettingsView::BRIGHTNESS) {
     uiHeader("BRIGHTNESS",6,"OLED");
-    uiLabel(6,17,"CONTRAST  /  PREVIEW");
+    uiLabel(6,17,"HOW BRIGHT AM I?");
     uiValue(6,28,BRIGHTNESS_LABELS[editBrightnessLevel]);
     uiMiniBar(6,46,115,editBrightnessLevel+1,BRIGHTNESS_LEVEL_COUNT);
     uiFooter("A:BACK","B:NEXT","H:SAVE");
   } else if(settingsView==SettingsView::AUTO_NIGHT) {
     uiHeader("AUTO NIGHT",7,"22-7");
-    uiLabel(6,17,"DIM AFTER 10 PM");
+    uiLabel(6,17,"COZY LIGHTS AT 10!");
     uiValue(8,28,editAutoNightMode ? "ON" : "OFF");
-    uiLabel(6,45,clockSynced?"Uses internet clock":"Needs time sync");
+    uiLabel(6,45,clockSynced?"I know bedtime <3":"Need WiFi clock <3");
     uiFooter("A:BACK","B:TOGG","H:SAVE");
   } else if(settingsView==SettingsView::BUZZER_ENABLE) {
     uiHeader("PIXO SOUNDS",5,"AUDIO");
-    uiLabel(6,17,"CUTE CHIRPS & MUSIC");
+    uiLabel(6,17,"MY TINY JINGLES  <3");
     uiValue(8,29,editBuzzerEnabled ? "ON" : "OFF");
-    uiLabel(6,46,"Tap B to toggle");
+    uiLabel(6,46,"B:TOGGLE  HOLD:SAVE");
     uiFooter("A:BACK","B:TOGG","H:SAVE");
-  } else if(settingsView==SettingsView::BUZZER_VOLUME) {
-    uiHeader("SOUND LEVEL",5,"0-4");
-    uiLabel(6,17,editBuzzerEnabled?"PIEZO PWM VOLUME":"SOUND CURRENTLY OFF");
-    char levelLabel[17];
-    snprintf(levelLabel,sizeof(levelLabel),"LEVEL %u",(unsigned)editBuzzerVolume);
-    uiValue(6,28,levelLabel);
-    uiMiniBar(6,46,115,editBuzzerVolume,BUZZER_MAX_VOLUME);
-    uiFooter("A:BACK","B:TEST","H:SAVE");
+  } else if(settingsView==SettingsView::TEST_SECRETS) {
+    uiHeader("TEST SECRETS",3,"DEBUG");
+    uiLabel(7,17,"SNEAK PEEK AT MAGIC!");
+    uiValue(8,29,editSecretTestMode?"ON":"OFF");
+    uiLabel(7,45,"Just pretend! No prizes");
+    uiFooter("A:BACK","B:TOGG","H:SAVE");
+
   } else if(settingsView==SettingsView::CLOCK) {
     uiHeader("CLOCK SYNC",1);
-    uiLabel(7,19,clockSynced?"INTERNET TIME READY":"TIME NOT SYNCED");
-    uiLabel(7,32,"Wi-Fi is OFF now");
-    uiLabel(7,45,"India time (IST)");
+    uiLabel(7,19,clockSynced?"YAY! CLOCK IS HAPPY":"CLOCK IS SLEEPY!");
+    uiLabel(7,32,"WiFi is napping");
+    uiLabel(7,45,"Asia/Kolkata IST");
     uiFooter("A:BACK");
   } else if(settingsView==SettingsView::OWNER) {
-    uiHeader("PET OWNER",0);
-    uiLabel(7,18,"MY FAVOURITE HUMAN");
+    uiHeader("MY FAVE HUMAN",0);
+    uiLabel(7,18,"MY FAVE HUMAN <3");
     uiValue(7,28,savedOwner);
-    uiLabel(7,48,"Change in firmware");
+    uiLabel(7,48,"Edit in PIXO code");
     uiFooter("A:BACK");
   } else if(settingsView==SettingsView::MEMORY) {
     uiHeader("PET MEMORY",3);
-    uiLabel(7,20,"SAVED IN ESP32 FLASH");
-    uiLabel(7,34,"No SD card needed");
-    uiLabel(7,45,"Keeps birth & pets");
+    uiLabel(7,20,"OUR MEMORIES LIVE HERE");
+    uiLabel(7,34,"Safe in my tiny brain!");
+    uiLabel(7,45,"Our story stays <3");
     uiFooter("A:BACK");
   } else if(settingsView==SettingsView::RESET) {
     uiHeader("FACTORY RESET",8);
     if(!resetArmed) {
-      uiLabel(7,19,"ERASE ALL PET MEMORY?");
-      uiLabel(7,32,"Birthday, pets, gifts");
-      uiLabel(7,45,"B tap to ARM reset");
+      uiLabel(7,19,"START OUR STORY OVER?");
+      uiLabel(7,32,"Bye, birthdays & gifts!");
+      uiLabel(7,45,"Tap B if you're sure");
       uiFooter("A:BACK","B:ARM");
     } else {
-      uiLabel(7,17,"RESET ARMED!  !!");
-      uiLabel(7,30,"HOLD B FOR 3 SEC");
+      uiLabel(7,17,"REALLY SAY GOODBYE?");
+      uiLabel(7,30,"Hold B 3s to restart");
       int fill=0;
       if(buttonB.down) {
         uint32_t held=now-buttonB.pressedAt;
@@ -1491,9 +1728,11 @@ void drawWardrobe(uint32_t now) {
   display.fillRect(0,53,128,11,SSD1306_BLACK);
   display.drawFastHLine(0,53,128,SSD1306_WHITE);
   display.setTextSize(1);display.setCursor(2,56);
-  display.print(ACCESSORIES[wardrobePreview]);
-  char item[7];snprintf(item,sizeof(item),"%u/%u",(unsigned)(wardrobePreview+1),(unsigned)ACCESSORY_COUNT);
-  display.setCursor(99,56);display.print(item);
+  if((now/2200)%2==0){
+    display.print(ACCESSORIES[wardrobePreview]);
+    char item[7];snprintf(item,sizeof(item),"%u/%u",(unsigned)(wardrobePreview+1),(unsigned)ACCESSORY_COUNT);
+    display.setCursor(99,56);display.print(item);
+  } else display.print(F("B:NEXT  HOLD:SAVE"));
   if(!reached(now,menuFeedbackUntil)) {
     display.fillRect(47,0,48,10,SSD1306_BLACK);
     display.setCursor(50,1);display.print(F("SAVED"));
@@ -1504,8 +1743,8 @@ void drawMenu(uint32_t now) {
   display.setTextColor(SSD1306_WHITE);
   if(!menuDetail) {
     static const char* const subtitles[]={
-      "Your pet's memories", "Time and calendar", "Coming soon",
-      "Hidden little wonders", "Cute outfits for PIXO", "Make PIXO your own"
+      "Our tiny story", "Pretty little day", "A surprise someday",
+      "My secret treasures", "Dress me up!", "Clouds and sunshine", "Tiny tweaks for me"
     };
     uiCardItem(MENU_ITEMS[menuIndex],subtitles[menuIndex],menuIndex,menuIndex,MENU_ITEMS_COUNT);
     return;
@@ -1515,13 +1754,22 @@ void drawMenu(uint32_t now) {
   else if(menuIndex==2) {
     uiHeader("BATTERY",2);
     uiIcon(2,54,20,SSD1306_WHITE);
-    uiLabel(27,42,"Coming soon");uiFooter("A:BACK");
+    uiLabel(27,42,"Soon, pinky promise!");uiFooter("A:BACK");
   } else if(menuIndex==3) {
-    uiHeader("SECRETS",3);
-    uiIcon(3,54,20,SSD1306_WHITE);
-    uiLabel(24,42,"Coming soon");uiFooter("A:BACK");
+    const uint8_t idx=secretPage%SECRET_COUNT;
+    char page[12];snprintf(page,sizeof(page),"%u/%u",idx+1,SECRET_COUNT);
+    uiHeader("SECRET DIARY",3,page);
+    display.setTextSize(1);
+    display.setCursor(5,17);display.print(SECRET_NAMES[idx]);
+    display.drawFastHLine(5,27,118,SSD1306_WHITE);
+    uiLabel(5,29,SECRET_HINTS[idx][0]);
+    uiLabel(5,38,SECRET_HINTS[idx][1]);
+    uiLabel(5,46,SECRET_HINTS[idx][2]);
+    // Three crisp hint lines above the button footer.
+    uiFooter("A:BACK",(pet.secrets&(1U<<idx))?"GOT IT!":"HIDDEN",secretTestMode?"H:TRY":"B:NEXT");
   } else if(menuIndex==4) drawWardrobe(now);
-  else if(menuIndex==5) drawSettingsPage(now);
+  else if(menuIndex==5)drawWeather(now);
+  else if(menuIndex==6)drawSettingsPage(now);
   display.setTextColor(SSD1306_WHITE);
 }
 void showMenu(uint32_t now) {
@@ -1534,8 +1782,9 @@ void menuNext(uint32_t now) {
   lastInteraction=now;
   if(!menuDetail) {menuIndex=(menuIndex+1)%MENU_ITEMS_COUNT;return;}
   if(menuIndex==0) menuPage=(menuPage+1)%7;
+  else if(menuIndex==3)secretPage=(secretPage+1)%SECRET_COUNT;
   else if(menuIndex==4) wardrobePreview=(wardrobePreview+1)%ACCESSORY_COUNT;
-  else if(menuIndex==5) {
+  else if(menuIndex==6) {
     switch(settingsView) {
       case SettingsView::LIST: settingsIndex=(settingsIndex+1)%SETTINGS_COUNT;break;
       case SettingsView::BRIGHTNESS: editBrightnessLevel=(editBrightnessLevel+1)%BRIGHTNESS_LEVEL_COUNT;break;
@@ -1546,10 +1795,7 @@ void menuNext(uint32_t now) {
         if(editBuzzerEnabled) buzzerPlay(SoundID::PREVIEW,now,true);
         else buzzerHalt();
         break;
-      case SettingsView::BUZZER_VOLUME:
-        editBuzzerVolume=(editBuzzerVolume+1)%(BUZZER_MAX_VOLUME+1);
-        buzzerPlay(SoundID::PREVIEW,now,true);
-        break;
+      case SettingsView::TEST_SECRETS:editSecretTestMode=!editSecretTestMode;break;
       case SettingsView::RESET: resetArmed=!resetArmed;break;
       default:break;
     }
@@ -1558,19 +1804,32 @@ void menuNext(uint32_t now) {
 void menuSelect(uint32_t now) {
   lastInteraction=now;
   if(!menuDetail) {
+    if(menuIndex==1){setState(State::CALENDAR,now);return;}
+    if(menuIndex==5){setState(State::WEATHER,now);return;}
     menuDetail=true;menuPage=0;settingsView=SettingsView::LIST;
     if(menuIndex==4)wardrobePreview=pet.accessory;
+    if(menuIndex==3)secretPage=0;
+  } else if(menuIndex==3 && secretTestMode) {
+    switch(secretPage){
+      case SEC_PEEK:startSecretAnimation(SecretAnim::PEEK,now,false);break;
+      case SEC_BIRTHDAY:setState(State::INTRO_BIRTHDAY,now);break;
+      case SEC_ALIEN:startSecretAnimation(SecretAnim::ALIEN,now,false);break;
+      case SEC_ANGEL:startSecretAnimation(SecretAnim::ANGEL,now,false);break;
+      case SEC_GHOST:startSecretAnimation(SecretAnim::GHOST,now,false);break;
+      case SEC_ROYAL:startSecretAnimation(SecretAnim::ROYAL,now,false);break;
+      case SEC_FRIEND:startSecretAnimation(SecretAnim::FRIEND,now,false);break;
+    }
   } else if(menuIndex==4) {
     pet.accessory=wardrobePreview;
     markPetDirty();savePetIfNeeded(now,true);
     menuFeedbackUntil=now+650;
-  } else if(menuIndex==5) {
+  } else if(menuIndex==6) {
     if(settingsView==SettingsView::LIST) {
       settingsView=(SettingsView)(settingsIndex+1);
       if(settingsView==SettingsView::BRIGHTNESS)editBrightnessLevel=savedBrightnessLevel;
       if(settingsView==SettingsView::AUTO_NIGHT)editAutoNightMode=autoNightMode;
       if(settingsView==SettingsView::BUZZER_ENABLE)editBuzzerEnabled=buzzerEnabled;
-      if(settingsView==SettingsView::BUZZER_VOLUME)editBuzzerVolume=buzzerVolume;
+      if(settingsView==SettingsView::TEST_SECRETS)editSecretTestMode=secretTestMode;
       if(settingsView==SettingsView::RESET)resetArmed=false;
     } else if(settingsView==SettingsView::BRIGHTNESS) {
       savedBrightnessLevel=editBrightnessLevel;
@@ -1588,12 +1847,10 @@ void menuSelect(uint32_t now) {
       settingsView=SettingsView::LIST;
       if(!buzzerEnabled) buzzerHalt();
       Serial.println(F("PIXO buzzer ON/OFF saved"));
-    } else if(settingsView==SettingsView::BUZZER_VOLUME) {
-      buzzerVolume=editBuzzerVolume;
-      petPrefs.putUChar("sndvol",buzzerVolume);
+    } else if(settingsView==SettingsView::TEST_SECRETS) {
+      secretTestMode=editSecretTestMode;
+      petPrefs.putBool("testsec",secretTestMode);
       settingsView=SettingsView::LIST;
-      buzzerHalt();
-      Serial.println(F("PIXO buzzer volume saved"));
     }
   }
 }
@@ -1601,14 +1858,14 @@ void menuBack(uint32_t now) {
   lastInteraction=now;
   if(state!=State::MENU) {showMenu(now);return;}
   if(!menuDetail) {setState(State::NORMAL,now);scheduleExpressions(now);return;}
-  if(menuIndex==5 && settingsView!=SettingsView::LIST) {
+  if(menuIndex==6 && settingsView!=SettingsView::LIST) {
     // Cancel changes without writing them to flash.
     settingsView=SettingsView::LIST;
     editBrightnessLevel=savedBrightnessLevel;
     editAutoNightMode=autoNightMode;
     editBuzzerEnabled=buzzerEnabled;
-    editBuzzerVolume=buzzerVolume;
-    if(forceSoundPreview) buzzerHalt();
+    editSecretTestMode=secretTestMode;
+
     resetArmed=false;
     return;
   }
@@ -1635,23 +1892,32 @@ bool isIntroState(State st) {
   return st==State::INTRO_CREDITS || st==State::INTRO_BOX ||
     st==State::INTRO_NAME || st==State::INTRO_PUSH ||
     st==State::INTRO_OPEN || st==State::INTRO_HELLO ||
-    st==State::INTRO_PROFILE || st==State::INTRO_BIRTHDAY;
+    st==State::INTRO_PROFILE || st==State::INTRO_BIRTHDAY ||
+    st==State::DAILY_GREETING;
 }
 void buttonShort(ButtonReader &b,uint32_t now) {
   if(isIntroState(state)) return;
   notePlayedToday();
-  const bool soundEditor=inSettingsDetail() &&
-    (settingsView==SettingsView::BUZZER_ENABLE || settingsView==SettingsView::BUZZER_VOLUME);
+  if(state==State::SLEEP || state==State::DROWSY) {
+    lastInteraction=now;petAfterWake=false;setState(State::WAKING,now);
+    return;  // One press wakes, following presses use the menu / feed.
+  }
+  const bool soundEditor=inSettingsDetail() && settingsView==SettingsView::BUZZER_ENABLE;
   if(b.pin==BUTTON_A_PIN) menuBack(now);
   else if(state==State::MENU) menuNext(now);
-  if(!soundEditor) buzzerPlay(b.pin==BUTTON_A_PIN?SoundID::BUTTON_A:SoundID::BUTTON_B,now);
+  else if(b.pin==BUTTON_B_PIN && hungry)startFeeding(now);
+  if(!soundEditor && state!=State::FEEDING) buzzerPlay(b.pin==BUTTON_A_PIN?SoundID::BUTTON_A:SoundID::BUTTON_B,now);
 }
 void buttonLong(ButtonReader &b,uint32_t now) {
   if(isIntroState(state)) return;
   notePlayedToday();
+  if(state==State::SLEEP || state==State::DROWSY) {
+    lastInteraction=now;petAfterWake=false;setState(State::WAKING,now);
+    return;
+  }
   if(b.pin==BUTTON_A_PIN) menuHome(now);
   else if(state==State::MENU) menuSelect(now);
-  if(buzzerEnabled && buzzerVolume>0)
+  if(buzzerEnabled)
     buzzerPlay(b.pin==BUTTON_A_PIN?SoundID::BUTTON_A:SoundID::BUTTON_B,now);
 }
 void scanButton(ButtonReader &b,uint32_t now) {
@@ -1672,13 +1938,10 @@ void updateButtons(uint32_t now) {
       bothButtonsLatched=true;
       buttonA.chordDone=true;buttonB.chordDone=true;
       buttonA.longDone=true;buttonB.longDone=true;
-      pet.secrets|=(1U<<0); // hidden royal button combination
-      markPetDirty();
       notePlayedToday();
-      savePetIfNeeded(now,true);
       lastInteraction=now;
-      setState(State::SECRET_REACTION,now);
-      Serial.println(F("PIXO SECRET: button A + B"));
+      startSecretAnimation(isMidnightWindow()?SecretAnim::GHOST:SecretAnim::PEEK,now);
+      Serial.println(F("PIXO: Peekaboo / midnight ghost button chord"));
     }
   } else bothButtonsLatched=false;
   if(buttonA.down && !buttonA.longDone && !buttonA.chordDone &&
@@ -1702,6 +1965,56 @@ void updateButtons(uint32_t now) {
   }
 }
 
+// ======================== BENGALURU WEATHER ========================
+// Open-Meteo public non-commercial API; HTTPS is used, certificate check
+// is disabled on prototype firmware (public non-sensitive weather only).
+// For production, install CA root pinning/cert validation.
+// Parse only current weather block; no ArduinoJson dependency.
+bool parseWxNumber(const String& block,const char* key,float &value) {
+ String needle=String("\"")+key+"\"";
+ int at=block.indexOf(needle);
+ if(at<0)return false;
+ int colon=block.indexOf(':',at+needle.length());if(colon<0)return false;
+ const char* p=block.c_str()+colon+1;
+ char* end=nullptr;
+ value=strtof(p,&end);
+ return end!=p;
+}
+void fetchWeatherAtStartup() {
+ if(!WEATHER_ENABLED || WiFi.status()!=WL_CONNECTED)return;
+ WiFiClientSecure client;client.setInsecure();
+ HTTPClient http;
+ const char* url="https://api.open-meteo.com/v1/forecast?latitude=12.9716&longitude=77.5946&current=temperature_2m,weather_code,wind_speed_10m&timezone=Asia%2FKolkata";
+ http.setConnectTimeout(2500);
+ http.setTimeout(3500);
+ if(!http.begin(client,url)){Serial.println(F("PIXO: weather URL failed"));return;}
+ int status=http.GET();
+ if(status==HTTP_CODE_OK) {
+   String payload=http.getString();
+   int at=payload.indexOf("\"current\"");
+   if(at>=0){
+     String block=payload.substring(at);
+     float temperature=0,code=0,wind=0;
+     if(parseWxNumber(block,"temperature_2m",temperature) &&
+        parseWxNumber(block,"weather_code",code) &&
+        parseWxNumber(block,"wind_speed_10m",wind)) {
+       weatherTemp10=(int)roundf(temperature*10.0f);
+       weatherCode=(int)code;
+       weatherWind10=(int)roundf(wind*10.0f);
+       weatherDate=currentLocalDate();
+       weatherValid=weatherDate!=0;
+       if(weatherValid){
+         petPrefs.putInt("wxtemp",weatherTemp10);
+         petPrefs.putInt("wxcode",weatherCode);
+         petPrefs.putInt("wxwind",weatherWind10);
+         petPrefs.putUInt("wxdate",weatherDate);
+       }
+       Serial.println(F("PIXO: weather updated"));
+     }
+   }
+ } else Serial.printf("PIXO weather HTTP: %d\n",status);
+ http.end();
+}
 // ===================== NETWORK + NTP ================================
 // Called during first intro screen; polling is entirely non-blocking.
 // Only WiFi.begin/configTime briefly issue calls; there is no delay loop.
@@ -1713,7 +2026,9 @@ void completeIntroWiFi(WifiStage result, uint32_t now) {
   wifiStage=result;
   wifiFinishedAt=now;
   clockSynced=(result==WifiStage::OK);
-  if(clockSynced) onClockReady();
+  if(clockSynced) {
+    onClockReady();checkDailyGreeting();checkSecretMilestones();
+  }
   stopIntroWiFi();
   Serial.print(F("PIXO NTP result: "));
   Serial.println(clockSynced ? F("synced, WiFi off") : F("not synced, WiFi off"));
@@ -1734,8 +2049,7 @@ void beginIntroWiFi(uint32_t now) {
 void updateIntroWiFi(uint32_t now) {
   if (wifiStage==WifiStage::CONNECTING) {
     if (WiFi.status()==WL_CONNECTED) {
-      configTime(TIMEZONE_GMT_OFFSET_SEC,TIMEZONE_DAYLIGHT_OFFSET_SEC,
-                 NTP_SERVER_1,NTP_SERVER_2);
+      configTzTime(TIMEZONE_POSIX,NTP_SERVER_1,NTP_SERVER_2);
       wifiStage=WifiStage::SYNCING;
       wifiStageStarted=now;
       Serial.println(F("PIXO: WiFi connected; synchronizing date/time"));
@@ -1744,6 +2058,7 @@ void updateIntroWiFi(uint32_t now) {
     }
   } else if (wifiStage==WifiStage::SYNCING) {
     if (time(nullptr)>(time_t)1700000000) {
+      fetchWeatherAtStartup();
       completeIntroWiFi(WifiStage::OK,now);
     } else if (now-wifiStageStarted>=NTP_SYNC_TIMEOUT_MS) {
       completeIntroWiFi(WifiStage::NTP_FAILED,now);
@@ -1757,22 +2072,22 @@ bool wifiIntroDone() {
 void drawIntroCredits(uint32_t now) {
   display.setTextSize(1);
   display.setCursor(28,0);display.print(F("DEVELOPED BY"));
-  display.setTextSize(2);
-  display.setCursor(40,10);display.print(F("ARUN"));
-  display.setCursor(28,27);display.print(F("YOKESH"));
+  display.setTextSize(1);
+  display.setCursor(49,16);display.print(F("ARUN"));
+  display.setCursor(43,28);display.print(F("YOKESH"));
   display.setTextSize(1);
   display.setCursor(12,45);
   switch(wifiStage) {
-    case WifiStage::CONNECTING: display.print(F("WiFi: connecting"));break;
+    case WifiStage::CONNECTING: display.print(F("Finding WiFi... <3"));break;
     case WifiStage::SYNCING:
       if (now-wifiStageStarted<500) display.print(F("WiFi connected!"));
-      else display.print(F("Syncing date/time"));
+      else display.print(F("Finding today..."));
       break;
-    case WifiStage::OK: display.print(F("Time set! WiFi off"));break;
-    case WifiStage::NO_CONFIG: display.print(F("Set WiFi in code"));break;
-    case WifiStage::CONNECT_FAILED: display.print(F("WiFi not found"));break;
-    case WifiStage::NTP_FAILED: display.print(F("NTP sync failed"));break;
-    default: display.print(F("Starting WiFi"));break;
+    case WifiStage::OK: display.print(F("Yay! I know today!"));break;
+    case WifiStage::NO_CONFIG: display.print(F("Where is my WiFi?"));break;
+    case WifiStage::CONNECT_FAILED: display.print(F("Oops! No WiFi :(") );break;
+    case WifiStage::NTP_FAILED: display.print(F("Clock is shy today"));break;
+    default: display.print(F("Wake up, WiFi!"));break;
   }
   display.drawRoundRect(12,56,104,6,2,SSD1306_WHITE);
   // A waiting indicator, not an invented network packet percentage.
@@ -1961,18 +2276,32 @@ void drawDreamIcon(uint32_t dt) {
   }
 }
 void drawSleeping(uint32_t dt) {
-  for (int i=0; i<2; ++i) {
+  // Slow breathing, blinking closed lids, dream bubbles and gentle Zzz.
+  float breath=sinf(((float)(dt%4200UL)/4200.0f)*6.2831853f);
+  int by=(int)(2*breath);
+  for (int i=0;i<2;i++) {
     int x=i?RIGHT_EYE_X:LEFT_EYE_X;
-    thickLine(x-12,33,x,35);
-    thickLine(x,35,x+12,33);
+    display.drawLine(x-15,34+by,x-5,38+by,SSD1306_WHITE);
+    display.drawLine(x-5,38+by,x+6,38+by,SSD1306_WHITE);
+    display.drawLine(x+6,38+by,x+15,34+by,SSD1306_WHITE);
+    display.drawLine(x-14,35+by,x-5,39+by,SSD1306_WHITE);
+    display.drawLine(x+6,39+by,x+14,35+by,SSD1306_WHITE);
   }
-  // No sudden position jump: smooth continuous Zzz bob.
-  float wave=sinf(((float)(dt%2600UL)/2600.0f)*6.2831853f);
-  int rise=(int)roundf(2.0f*wave);
+  // Cozy blush freckles; gently glowing like a night-light.
+  if((dt/2700)%3!=2){
+    display.drawPixel(18,44+by,SSD1306_WHITE);
+    display.drawPixel(21,45+by,SSD1306_WHITE);
+    display.drawPixel(107,45+by,SSD1306_WHITE);
+    display.drawPixel(110,44+by,SSD1306_WHITE);
+  }
+  // Blanket below the closed eyes without hiding them.
+  display.drawRoundRect(7,52+by,114,17,7,SSD1306_WHITE);
+  display.drawFastHLine(15,54+by,98,SSD1306_WHITE);
   display.setTextSize(1);
-  display.setCursor(99,6-rise);
-  display.print(F("Zzz"));
+  int z=(int)(3*sinf(dt*.0025f));
+  display.setCursor(98,4-z);display.print((dt/3000)%2?F("zZz"):F("Zzz"));
   drawDreamIcon(dt);
+  if((dt/850)%2==0){tinySparkle(14,12,3);tinySparkle(116,25,2);}
 }
 void drawWaking(uint32_t dt) {
   uint32_t popDt=dt>20 ? dt-20 : 0;
@@ -2000,27 +2329,28 @@ void drawLogo(uint32_t dt, bool full) {
 void drawCredits() {
   display.setTextSize(1);
   display.setCursor(28,10); display.print(F("DEVELOPED BY"));
-  display.setTextSize(2);
-  display.setCursor(40,25); display.print(F("ARUN"));
-  display.setCursor(28,44); display.print(F("YOKESH"));
+  display.setCursor(49,25); display.print(F("ARUN"));
+  display.setCursor(43,38); display.print(F("YOKESH"));
 }
 
 // ====================== STATE / TOUCH LOGIC ==========================
 void setState(State next, uint32_t now) {
   const State old=state;
+  if(old!=next && next!=State::INTRO_BIRTHDAY && next!=State::SECRET_REACTION &&
+     (old==State::INTRO_BIRTHDAY || old==State::SECRET_REACTION)) buzzerHalt();
   state=next;
   stateStarted=now;
   if(next!=old) {
     switch(next) {
       case State::INTRO_BOX: buzzerPlay(SoundID::STARTUP,now);break;
-      case State::INTRO_BIRTHDAY: buzzerPlay(SoundID::BIRTHDAY,now);break;
+      case State::INTRO_BIRTHDAY: buzzerPlay(SoundID::BIRTHDAY,now);nextSecretMelodyAt=now+4800;break;
       case State::WAKING: buzzerPlay(SoundID::WAKE,now);break;
       case State::DROWSY: buzzerPlay(SoundID::SLEEP,now);break;
       case State::MUSIC: buzzerPlay(SoundID::MUSIC,now);break;
       case State::SECRET_REACTION: buzzerPlay(SoundID::SECRET,now);break;
       case State::SLEEP:
         buzzerHalt();
-        nextDreamChirp=now+(uint32_t)random(25000,45001);
+        nextDreamChirp=now+(uint32_t)random(55000,85001);
         break;
       default:break;
     }
@@ -2030,7 +2360,7 @@ void setState(State next, uint32_t now) {
     // Only reboot/wake finishing starts a new idle window. An automatic
     // expression or a pet reaction cannot extend the 60-second inactivity.
     if (old==State::INTRO_PROFILE || old==State::INTRO_BIRTHDAY ||
-        old==State::WAKING)
+        (old==State::WAKING && !hungryFromSleep))
       lastInteraction=now;
     resetNatural(now);
   }
@@ -2113,12 +2443,16 @@ void updateState(uint32_t now) {
         if(anniversaryQueued) {
           anniversaryQueued=false;
           setState(State::INTRO_BIRTHDAY,now);
+        } else if(dailyGreetingQueued){
+          markDailyGreetingShown();setState(State::DAILY_GREETING,now);
         } else {setState(State::NORMAL,now);scheduleExpressions(now);}
       }
       break;
     case State::INTRO_BIRTHDAY:
+      if(reached(now,nextSecretMelodyAt) && buzzerEnabled){buzzerPlay(SoundID::BIRTHDAY,now);nextSecretMelodyAt=now+4800;}
       if(dt>=INTRO_BIRTHDAY_MS) {
-        setState(State::NORMAL,now);scheduleExpressions(now);
+        if(dailyGreetingQueued){markDailyGreetingShown();setState(State::DAILY_GREETING,now);}
+        else {setState(State::NORMAL,now);scheduleExpressions(now);}
       }
       break;
     case State::NORMAL: {
@@ -2127,8 +2461,22 @@ void updateState(uint32_t now) {
         setState(State::INTRO_BIRTHDAY,now);
         break;
       }
+      if(pendingAlien){pendingAlien=false;startSecretAnimation(SecretAnim::ALIEN,now);break;}
+      if(pendingRoyal){pendingRoyal=false;startSecretAnimation(SecretAnim::ROYAL,now);break;}
+      if(pendingAngel){pendingAngel=false;startSecretAnimation(SecretAnim::ANGEL,now);break;}
+      if(pendingFriend){pendingFriend=false;startSecretAnimation(SecretAnim::FRIEND,now);break;}
+      if(!nextHungerAt)nextHungerAt=now+HUNGER_INTERVAL_MS;
+      if(!hungry && reached(now,nextHungerAt)) {
+        hungry=true;hungerAskedAt=now;hungryFromSleep=false;
+        buzzerPlay(SoundID::HUNGRY,now);
+      }
+      if(hungry && now-hungerAskedAt>=HUNGER_PROMPT_MS) {
+        hungry=false;nextHungerAt=now+HUNGER_INTERVAL_MS;
+        if(hungryFromSleep){hungryFromSleep=false;setState(State::DROWSY,now);break;}
+      }
       const uint32_t idle=now-lastInteraction;
-      if (AUTO_SLEEP && stableTouch==TOUCH_IDLE && idle>=IDLE_SLEEP_MS) {
+      if (AUTO_SLEEP && idle>=IDLE_SLEEP_MS &&
+          !hungry) {
         setState(State::DROWSY,now);
         break;
       }
@@ -2141,7 +2489,7 @@ void updateState(uint32_t now) {
       }
       if (blushShowing && now-blushStarted>=RANDOM_BLUSH_MS)
         blushShowing=false;
-      if (stableTouch==TOUCH_IDLE && blink==Blink::READY &&
+      if (!hungry && blink==Blink::READY &&
           (!AUTO_SLEEP || idle+HEART_MS+350 < IDLE_SLEEP_MS)) {
         if (HEART_BALLOONS && reached(now,nextHearts)) {
           setState(State::HEARTS,now);
@@ -2195,40 +2543,41 @@ void updateState(uint32_t now) {
       if(dt>=STARRY_MS) setState(State::NORMAL,now);
       break;
     case State::SECRET_REACTION:
+      if(reached(now,nextSecretMelodyAt) && buzzerEnabled){buzzerPlay(SoundID::SECRET,now);nextSecretMelodyAt=now+4000;}
       if(dt>=SECRET_CELEBRATE_MS) {setState(State::NORMAL,now);scheduleExpressions(now);}
       break;
     case State::MENU:
       // Menu is controlled by GPIO18/19. Idle sleep is suppressed in menu.
       break;
     case State::CALENDAR:
-      // Release is handled in updateTouch(); no intro/restart or blocking.
+      if(dt>=CALENDAR_SHOW_MS)setState(State::WEATHER,now);
       break;
-    case State::PET: {
-      // IMPORTANT: an external TTP223 can remain HIGH for 2-5 seconds
-      // after a short tap. Never let the sensor HIGH or recurring heart
-      // particles extend the facial-expression timer indefinitely.
-      const uint32_t petAge = now - petTapAt;
-#if USE_NATIVE_ESP32_TOUCH
-      const bool realTouchHeld = stableTouch == TOUCH_ACTIVE;
-#else
-      const bool realTouchHeld = CONTINUE_PET_WHILE_TOUCH_HIGH &&
-                                 stableTouch == TOUCH_ACTIVE;
-#endif
-      if (!realTouchHeld && petAge >= PET_AFTER_TAP_MS) {
-        setState(State::NORMAL, now);
-        scheduleExpressions(now);
-      }
-      // Default TTP223: ALWAYS stop after ~1.15 seconds (not 5 seconds),
-      // despite the LED / OUT staying HIGH after the finger is removed.
+    case State::WEATHER:
+      if(dt>=WEATHER_SHOW_MS){setState(State::NORMAL,now);scheduleExpressions(now);}
       break;
-    }
+    case State::FEEDING:
+      if(dt>=FEED_MS){setState(State::NORMAL,now);scheduleExpressions(now);}
+      break;
+    case State::DAILY_GREETING:
+      if(dt>=GREETING_SHOW_MS){setState(State::NORMAL,now);scheduleExpressions(now);}
+      break;
+    case State::PET:
+      if(dt>=1150){setState(State::NORMAL,now);scheduleExpressions(now);}
+      break;
+
     case State::DROWSY:
       if (dt>=DROWSY_MS) setState(State::SLEEP,now);
       break;
     case State::SLEEP:
+      // Occasionally wake to ask for food, then fall asleep if ignored.
+      if(!hungry && nextHungerAt && reached(now,nextHungerAt)) {
+        hungry=true;hungerAskedAt=now;hungryFromSleep=true;
+        petAfterWake=false;setState(State::WAKING,now);
+        buzzerPlay(SoundID::HUNGRY,now);break;
+      }
       if(reached(now,nextDreamChirp)) {
         buzzerPlay(SoundID::DREAM,now);
-        nextDreamChirp=now+(uint32_t)random(25000,45001);
+        nextDreamChirp=now+(uint32_t)random(55000,85001);
       }
       break;
     case State::WAKING:
@@ -2244,106 +2593,7 @@ void updateState(uint32_t now) {
       break;
   }
 }
-// Touch detection is separate from animation timing: never block the loop.
-// Both input choices feed the same quick press + continuous-held response.
-uint8_t readTouchLevel() {
-#if USE_NATIVE_ESP32_TOUCH
-  // Native GPIO32 T9 on CLASSIC ESP32; bare electrode, NO TTP223 board.
-  // touchRead value falls when a finger touches the electrode.
-  return touchRead(TOUCH_PIN) < nativeTouchThreshold ? TOUCH_ACTIVE : TOUCH_IDLE;
-#else
-  // TTP223 digital output. HIGH=touch in default non-toggle mode.
-  return digitalRead(TOUCH_PIN);
-#endif
-}
-void updateTouch(uint32_t now) {
-  const uint8_t reading = readTouchLevel();
-  if (reading != lastRawTouch) touchChangedAt = now;
-  lastRawTouch = reading;
-
-  if (reading != stableTouch && now - touchChangedAt >= DEBOUNCE_MS) {
-    stableTouch = reading;
-    if (stableTouch == TOUCH_ACTIVE) {
-      touchDownAt=now;
-      calendarHoldConsumed=false;
-      ++touchCount;
-      lastInteraction = now;
-      if(state!=State::INTRO_CREDITS && state!=State::INTRO_BOX &&
-         state!=State::INTRO_NAME && state!=State::INTRO_PUSH &&
-         state!=State::INTRO_OPEN && state!=State::INTRO_HELLO &&
-         state!=State::INTRO_PROFILE && state!=State::INTRO_BIRTHDAY)
-        recordPetTouch();
-      if (TOUCH_DEBUG) {
-        Serial.print(F("TOUCH: DOWN #"));
-        Serial.println(touchCount);
-      }
-      if (state==State::INTRO_CREDITS || state==State::INTRO_BOX ||
-          state==State::INTRO_NAME || state==State::INTRO_PUSH ||
-          state==State::INTRO_OPEN || state==State::INTRO_HELLO ||
-          state==State::INTRO_PROFILE || state==State::INTRO_BIRTHDAY) {
-        // Let startup finish; initial greeting cannot be reset by touch.
-      } else if (state == State::SLEEP || state == State::DROWSY) {
-        petAfterWake = true;
-        setState(State::WAKING, now);
-      } else if (state == State::WAKING) {
-        // Do not interrupt shaking eyes. Its end will run startPet().
-        petAfterWake = true;
-      } else {
-        startPet(now);
-      }
-      // A short happy chirp for petting; never replays any intro.
-      if((state==State::PET) && !petAfterWake)
-        buzzerPlay(SoundID::PET,now);
-    } else {
-      if (state==State::CALENDAR) {
-        setState(State::NORMAL,now);
-        scheduleExpressions(now);
-      }
-      if (TOUCH_DEBUG) Serial.println(F("TOUCH: UP"));
-    }
-  }
-
-  if (stableTouch == TOUCH_ACTIVE) {
-    if (CALENDAR_ON_LONG_TOUCH && !calendarHoldConsumed &&
-        state!=State::CALENDAR && state!=State::INTRO_CREDITS &&
-        state!=State::INTRO_BOX && state!=State::INTRO_NAME &&
-        state!=State::INTRO_PUSH && state!=State::INTRO_OPEN &&
-        state!=State::INTRO_HELLO && state!=State::INTRO_PROFILE &&
-        state!=State::INTRO_BIRTHDAY && state!=State::MENU &&
-        state!=State::SECRET_REACTION && state!=State::DROWSY && state!=State::SLEEP &&
-        state!=State::WAKING) {
-#if USE_NATIVE_ESP32_TOUCH
-      const uint32_t longHoldMs=NATIVE_CALENDAR_HOLD_MS;
-#else
-      const uint32_t longHoldMs=TTP223_CALENDAR_HOLD_MS;
-#endif
-      if (now-touchDownAt>=longHoldMs) {
-        calendarHoldConsumed=true;
-        setState(State::CALENDAR,now);
-        Serial.println(F("PIXO: calendar hold"));
-      }
-    }
-    // Keep idle sleep from interrupting the reaction while OUT is active.
-    // Repeating visual particles NEVER extends the PET facial-expression timer.
-    lastInteraction = now;
-    if (state == State::PET && now - petHoldBurstAt >= HELD_HEART_EVERY_MS) {
-#if USE_NATIVE_ESP32_TOUCH
-      const bool canRepeat = true;
-#else
-      const uint32_t petAge = now - petTapAt;
-      // During the 1-second auto-return reaction, allow one or two extra
-      // hearts but don't start particles right before we return to normal.
-      const bool canRepeat = CONTINUE_PET_WHILE_TOUCH_HIGH ||
-                             petAge + PET_HEART_LIFETIME_MS < PET_AFTER_TAP_MS;
-#endif
-      if (canRepeat) {
-        spawnPetHearts(now);
-        if (TOUCH_DEBUG) Serial.println(F("TOUCH: HEART BURST"));
-      }
-    }
-  }
-}
-
+// Touch hardware removed. PET animation remains available for future input types.
 // ====================== RENDER + HARDWARE ============================
 void render(uint32_t now) {
   display.clearDisplay();   // RAM only; avoids hardware clear/display flicker
@@ -2363,6 +2613,14 @@ void render(uint32_t now) {
       eyes(blinkOpenness(now),gazeX,0,gazeY+bob);
       if (blushShowing) drawBlush();
       drawAccessoryOverlay(pet.accessory);
+      if(pet.secrets&(1U<<SEC_FRIEND))drawBeeFriend(now);
+      if(hungry){
+        display.fillRect(0,0,128,11,SSD1306_BLACK);
+        display.setTextSize(1);display.setCursor(1,1);
+        display.print(F("HEY "));display.print(savedOwner.substring(0,6));display.print(F("! YUM?"));
+        display.fillRect(0,54,128,10,SSD1306_BLACK);
+        display.setCursor(16,55);display.print(F("B: SNACK PLS <3"));
+      }
       if (blink != Blink::READY && ((now/110)%2)==0) {
         tinySparkle(13,18,2); tinySparkle(115,18,2);
       }
@@ -2380,8 +2638,11 @@ void render(uint32_t now) {
     case State::UPSIDE_DOWN:drawUpsideDown(dt);break;
     case State::STARRY:drawStarry(dt);break;
     case State::MENU:drawMenu(now);break;
-    case State::SECRET_REACTION:drawSecret(dt);break;
+    case State::SECRET_REACTION:drawSecretEvent(dt);break;
     case State::CALENDAR: drawCalendar(now); break;
+    case State::WEATHER:drawWeather(now);break;
+    case State::DAILY_GREETING:drawDailyGreeting(dt);break;
+    case State::FEEDING:drawFeeding(dt);break;
     case State::PET: drawPet(dt,now); break;
     case State::DROWSY: drawDrowsy(dt); break;
     case State::SLEEP: drawSleeping(dt); break;
@@ -2396,32 +2657,8 @@ void render(uint32_t now) {
 }
 void setup() {
   Serial.begin(115200);
-#if USE_NATIVE_ESP32_TOUCH
-  // Calibrate untouched GPIO32 electrode. Avoid contact during boot.
-  // The sensor's OUT must NOT be attached when using native touchRead().
-  uint32_t total = 0;
-  for (uint8_t i = 0; i < 24; ++i) {
-    total += touchRead(TOUCH_PIN);
-    delay(7);                // setup-time electrode baseline only
-  }
-  uint16_t baseline = (uint16_t)(total / 24);
-  nativeTouchThreshold = (uint16_t)(((uint32_t)baseline *
-                                     NATIVE_TOUCH_PERCENT_OF_BASELINE) / 100);
-  if (TOUCH_DEBUG) {
-    Serial.print(F("PIXO native touch baseline: ")); Serial.println(baseline);
-    Serial.print(F("PIXO native touch threshold: ")); Serial.println(nativeTouchThreshold);
-    Serial.println(F("Do NOT connect external TTP223 OUT in native mode."));
-  }
-#else
-  // TTP223 actively drives its OUT HIGH/LOW; no internal pull-up.
-  pinMode(TOUCH_PIN, INPUT);
-  if (TOUCH_DEBUG) {
-    Serial.println(F("PIXO TTP223: OUT->GPIO32, VCC->3V3, GND->GND"));
-    Serial.println(F("PIXO touch: jumper B/TOG must be OPEN (momentary mode)"));
-    Serial.println(F("PIXO AUTO-RETURN: normal eyes in ~1.15 s, even if LED remains ON"));
-  }
-#endif
-  touchChangedAt = millis();
+  // GPIO32 remains unused; no touch sensor setup is required.
+
   pinMode(BUTTON_A_PIN, INPUT_PULLUP); // Button A -> GPIO18 and GND
   pinMode(BUTTON_B_PIN, INPUT_PULLUP); // Button B -> GPIO19 and GND
   Wire.begin(OLED_SDA,OLED_SCL);
@@ -2433,7 +2670,7 @@ void setup() {
   display.setTextWrap(false);
   randomSeed(esp_random());
   loadPetMemory();
-  buzzerInit();  // GPIO27, separate from TTP223 on GPIO32
+  buzzerInit();  // GPIO27 passive piezo
   updateDisplayContrast(); // use saved level immediately, even during intro
   startIntroAtBoot(millis());
   beginIntroWiFi(millis());
@@ -2441,11 +2678,10 @@ void setup() {
 }
 void loop() {
   uint32_t now=millis();
-  updateIntroWiFi(now);     // Startup-only network time sync; Wi-Fi then OFF
+  updateIntroWiFi(now);     // NTP + Open-Meteo once at startup; then Wi-Fi OFF
   updateDisplayContrast();  // only sends commands when contrast actually changes
   updateButtons(now);        // 2 tactile menu keys, non-blocking and debounced
   buzzerUpdate(now);       // nonblocking PWM tone sequencer
-  updateTouch(now);          // Existing touch petting behaviour
   checkPetDateDuringRuntime(now);
   updateState(now);
   savePetIfNeeded(now);      // NVS wear-aware periodic save
