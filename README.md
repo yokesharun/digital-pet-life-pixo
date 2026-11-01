@@ -1,188 +1,156 @@
-PIXO PET LIFE v3 | MENU + BRIGHTNESS + AUTO NIGHT + WARDROBE
-==========================================================
-Firmware for the classic ESP32 38-pin development board and a 128x64
-SSD1306 OLED. Extends the prior PIXO_Pet_Life_Menu_v2 firmware.
+PIXO PET LIFE v4 - KAWAII BUZZER, VOLUME & SOUND SETTINGS
+=========================================================
+Compatible design: classic ESP32 38-pin + SSD1306 128x64 OLED +
+TTP223 touch module + two tactile pushbuttons.
+Extends your original PIXO_Pet_Life_Menu_v3.ino. The existing eye
+animations, petting timing, birthdays, memories, Wi-Fi time sync,
+brightness, night mode, wardrobe and factory reset stay in place.
 
-FILES
-  PIXO_Pet_Life_Menu_v3.ino  - Arduino IDE firmware
-  PIXO_Pet_Life_Menu_v3.txt  - Same complete source as plain text
+CONTENTS
+  PIXO_Pet_Life_Menu_v4_Buzzer.ino   Arduino source
+  PIXO_Pet_Life_Menu_v4_Buzzer.txt   Same complete source
+  PIXO_Pet_Life_Menu_v4_Buzzer_README.txt   This file
+  PIXO_Buzzer_Wiring.png             Visual connection guide
 
-WHAT CHANGED IN v3
-  - Five selectable OLED contrast levels with LIVE preview.
-  - Settings > Brightness: B short = next level, B long = SAVE,
-    A short = CANCEL / return to Settings list.
-  - Settings > Auto night: ON/OFF, saved with B long.
-  - Night mode dims from 22:00 to 07:00 in the configured local time
-    (default IST), restoring your saved daytime level at 07:00.
-  - Settings is now a dedicated submenu, not an information slideshow.
-  - Main menu cards, inverse-colour headers, monochrome icons,
-    larger primary text, and smaller supporting descriptions.
-  - My PIXO has seven separate info pages for readable statistics.
-  - Wardrobe now has 12 accessories, positioned ABOVE or BESIDE eyes.
-    B short = preview next, B long = equip and save.
-  - Settings > Factory reset added, with an ARM step plus 3-second
-    uninterrupted B hold; cannot erase by a simple accidental press.
-  - Both new display settings stored in ESP32 Preferences/NVS.
-  - Existing binary PetProfile layout and touch animation timing
-    preserved for compatibility with v2 saved pet data.
+IMPORTANT: GPIO32 IS ALREADY USED FOR YOUR TOUCH SENSOR!
+-------------------------------------------------------
+DO NOT connect the buzzer to GPIO32, even if you have seen that in
+another project. Use GPIO27 for PIXO's new buzzer.
 
-CONFIGURE AT TOP OF .INO
-  WIFI_ENABLED       = true
-  WIFI_SSID          = "YOUR_WIFI_NAME"
-  WIFI_PASSWORD      = "YOUR_PASSWORD"
-  PET_OWNER_NAME     = "YOUR NAME"
-  BUTTON_A_PIN       = 18
-  BUTTON_B_PIN       = 19
-  OLED_SDA           = 25   (unchanged)
-  OLED_SCL           = 26   (unchanged)
-  TOUCH_PIN          = 32   (unchanged)
-  TIMEZONE_GMT_OFFSET_SEC = 5*3600 + 30*60   // India / IST
+YOUR EXISTING WIRING (UNCHANGED)
+--------------------------------
+OLED SDA          -> GPIO25
+OLED SCL          -> GPIO26
+OLED power        -> 3V3 and GND (as your current module requires)
+TTP223 OUT        -> GPIO32
+TTP223 VCC/GND    -> 3V3/GND
+Button A          -> GPIO18 and GND (INPUT_PULLUP)
+Button B          -> GPIO19 and GND (INPUT_PULLUP)
 
-  Brightness config:
-  BRIGHTNESS_LEVELS  = {12, 35, 80, 145, 230}
-  DEFAULT_BRIGHTNESS_LEVEL = 3     // BRIGHT; zero-based index
-  DEFAULT_AUTO_NIGHT_MODE  = true  // starts ON unless previously saved
-  NIGHT_CONTRAST           = 20    // dim, not a battery %
-  NIGHT_START_HOUR         = 22    // 10 PM
-  NIGHT_END_HOUR           = 7     // 7 AM
+NEW WIRING, TWO-PIN LOW-CURRENT PASSIVE PIEZO
+----------------------------------------------
+    ESP32 GPIO27 ------------------ (+) passive piezo
+    ESP32 GND   ------------------- (-) passive piezo
 
-  SSD1306 contrast 0-255 controls OLED pixel intensity and is NOT a
-  calibrated brightness percentage. Actual appearance varies by panel.
-  Brightness will be temporarily higher in the Brightness editor
-  to let you preview levels, even if automatic night mode is active.
-  When you save/exit, night dimming will apply again until 07:00.
+All grounds are common. The BUZZER + pin is NOT tied to 3.3V in
+this direct-drive passive-piezo arrangement. Keep wiring short.
+Only connect directly if the part is a high-impedance passive piezo
+that draws sufficiently little current for an ESP32 GPIO. If the
+part has a coil, draws more than ~8 mA, or you don't know its
+current, use a transistor driver instead.
 
-HARDWARE WIRING (UNCHANGED)
-  OLED VCC       -> 3.3V
-  OLED GND       -> GND
-  OLED SDA       -> GPIO25
-  OLED SCL       -> GPIO26
-  TTP223 VCC     -> 3.3V
-  TTP223 GND     -> GND
-  TTP223 OUT     -> GPIO32
-  Button A       -> GPIO18 and GND
-  Button B       -> GPIO19 and GND
+OPTIONAL NPN TRANSISTOR DRIVER (FOR HIGHER-CURRENT BUZZERS)
+----------------------------------------------------------
+    ESP32 GPIO27 -> 1 kOhm resistor -> NPN transistor BASE
+    ESP32 GND    -------------------> NPN transistor EMITTER
+    3.3V         -------------------> BUZZER positive (+)
+    BUZZER negative (-) ------------> NPN transistor COLLECTOR
 
-  For each 4-leg tactile switch: choose two terminals that are
-  OPEN when released and CONNECTED only when pressed. The two pins
-  on one electrically common side are NOT a valid button pair.
-  Verify with a continuity tester. Switches use INPUT_PULLUP:
-  no external pull-up resistors, and DO NOT connect them to 5V.
+This is a low-side driver, appropriate when PWM on/off of the buzzer
+is required. Follow the component's rated voltage/current. A
+magnetic/inductive buzzer may need a flyback diode; a bare passive
+piezo normally does not. NEVER connect 5V directly to GPIO27.
 
-BUTTON CONTROLS
-  A short     - Open main menu / go BACK one level / cancel editing
-  A long      - Exit menu immediately to PIXO face (750 ms)
-  B short     - Next root menu item or selected detail page
-  B long      - Enter selected item or SAVE/SELECT (750 ms)
-  A+B         - Hidden royal Easter egg (same as previous firmware)
-  Touch       - Same petting and 1.15-sec auto-return as before
+WHICH TYPE DID YOU BUY?
+-----------------------
+* PASSIVE PIEZO (no built-in oscillator): can generate different
+  pitched notes and a cute startup melody using PWM. The firmware
+  is designed for THIS TYPE. A passive transducer won't make a
+  sustained beep just by applying DC voltage.
+* ACTIVE BUZZER (built-in oscillator): makes one steady beep with
+  direct 3.3V DC power. Can beep rhythmically, but cannot reliably
+  play melodies or offer true software volume control. For the
+  requested feature, replace it with a passive piezo/transducer.
+* 3-PIN MODULE: module VCC to 3.3V, GND to common ground, SIG to
+  GPIO27 ONLY if its signal interface is compatible with 3.3V
+  PWM; an active 3-pin module still cannot do multi-note tunes.
 
-MAIN MENU
-  My PIXO     - 7 info pages:
-     1  age + date of birth
-     2  affection level and progress bar
-     3  total petting count + personality
-     4  growth stage + currently worn accessory
-     5  consecutive play days + Easter eggs unlocked
-     6  last interaction date
-     7  owner name + most frequent random reaction
-  Calendar    - Japanese-style internet-synced clock/date
-  Battery     - Coming soon; no battery hardware is required in v3
-  Secrets     - Coming soon; A+B unlock still saved in pet profile
-  Wardrobe    - 12 accessory choices, shown on real PIXO face
-  Settings    - A NEW submenu (see below)
+CONFIG AT THE TOP OF THE .INO
+------------------------------
+  WIFI_SSID / WIFI_PASSWORD             Your 2.4 GHz Wi-Fi
+  PET_OWNER_NAME                         Your owner's name
+  BUZZER_PIN = 27                        Free output pin
+  BUZZER_ENABLED_DEFAULT = true         Initial default
+  BUZZER_VOLUME_DEFAULT = 2             Initial level 0-4
+  BUZZER_MAX_VOLUME = 4                  Five preset levels
+
+Previously saved sound preferences override the compiled defaults.
+Factory reset clears them along with the rest of PIXO's pet data.
+
+MENU CONTROLS
+--------------
+Button A short: open menu / go back / cancel editing
+Button A long:  return directly to PIXO face
+Button B short: next item; on Sound Level, cycle 0..4 & PREVIEW
+Button B long:  open item / save selected value
+Both together:  same royal Easter egg as v3
+Touch:          same petting/wake/calendar behaviour as v3
 
 SETTINGS SUBMENU
-  1 Brightness
-  2 Auto night
-  3 Clock sync
-  4 Pet owner
-  5 Pet memory
-  6 Factory reset
+----------------
+  1 Brightness     (unchanged)
+  2 Auto night     (unchanged)
+  3 Buzzer         NEW; B short ON/OFF; B long SAVE
+  4 Sound level    NEW; B short 0-4, hear a preview; B long SAVE
+  5 Clock sync     (unchanged)
+  6 Pet owner      (unchanged)
+  7 Pet memory     (unchanged)
+  8 Factory reset  (unchanged; ARM then hold B 3 seconds)
 
-  B short advances to next Settings entry. B long opens it.
-  A short returns from detail screen to Settings list and from
-  Settings list to the main menu.
+Sound level zero is silent even with the buzzer enabled. The PWM
+settings change the strength/timbre of a passive piezo; they are
+not calibrated volume percentages and cannot make all buzzer
+modules equally quiet or loud. Start at level 1 or 2.
 
-SETTINGS > BRIGHTNESS
-  B short  - Cycle MOON > SOFT > COZY > BRIGHT > MAX > repeat
-  B long   - Save selected level to ESP32 NVS, return to Settings
-  A short  - Discard uncommitted change, return to Settings
-  NIGHT MODE may lower the effective contrast when 22:00-06:59.
+CUTE SOUND EVENTS
+-----------------
+Startup intro: an original short kawaii multi-note jingle, after
+  Wi-Fi date/time sync completes and the PIXO logo intro begins.
+Waking: 4 rising twinkles during shaking-eyes wake-up.
+Drowsy: quiet descending sleepy/yawn tone.
+Sleeping: an occasional very low, two-note dreamy purr every
+  25-45 seconds (level capped to quiet even if daytime is loud).
+Buttons: different little double-chirps for buttons A and B.
+Petting: a tiny happy twinkle after a detected touch.
+Headphones/music animation: original playful melody timed with the
+  music expression (no audio file or copyrighted song).
+Birthday: special celebratory arpeggio.
+A+B secret: magical rising tones.
 
-SETTINGS > AUTO NIGHT
-  B short  - Toggle ON / OFF in the editor
-  B long   - Save ON/OFF to ESP32 NVS
-  A short  - Cancel uncommitted change
-  When ON AND the internet clock was successfully synchronized on
-  this power session, PIXO dims to contrast 20 between 22:00 and
-  06:59, restoring the normal saved contrast at 07:00.
-  When OFF, the chosen manual contrast is used all day.
-  If Wi-Fi/NTP fails on a fresh power-on, no trusted wall-clock time
-  is available: PIXO keeps your normal level until NTP succeeds.
-  Wi-Fi still turns OFF after startup synchronization, as before;
-  ESP32 keeps the time while powered.
+All sounds are sequenced WITHOUT delay(). Buzzer playback doesn't
+pause the OLED animation, Wi-Fi handling, touch, menu, or clocks.
+Sound ON/OFF and volume are stored in the existing 'pixo' NVS
+namespace using separate keys 'sndon' and 'sndvol'; the existing
+pet profile/birthday memory format has NOT changed.
 
-SETTINGS > FACTORY RESET - IMPORTANT: DELETES PET MEMORIES
-  Step 1: Open Settings > Factory reset (B long).
-  Step 2: B SHORT to ARM. Screen says RESET ARMED!
-  Step 3: HOLD Button B continuously for 3 seconds.
-  PIXO erases only its own "pixo" Preferences/NVS namespace and
-  restarts. This DELETES birthday, petting count, affection, streak,
-  secrets, outfit, owner stored in NVS, brightness and night settings.
-  PET_OWNER_NAME in firmware is NOT erased (code configuration).
-  A short cancels/back without erasing. A short also un-arms reset.
-  Pet's new birthday will be set on the next valid internet sync.
-  Factory reset CANNOT be undone; back up important data separately.
+ARDUINO IDE
+------------
+* Board: your classic ESP32 board (commonly ESP32 Dev Module).
+* Install/use ESP32 boards package (Arduino-ESP32 2.x or 3.x).
+* Libraries: Adafruit GFX and Adafruit SSD1306.
+* WiFi, Wire, Preferences and LEDC come with the ESP32 board core.
+* Open the .ino, enter credentials and owner name, connect GPIO27
+  only after checking buzzer type/current, and upload.
+* Serial Monitor: 115200 baud.
 
-WARDROBE (12 ACCESSORIES)
-  None, Mini bow, Cozy headphones, Mini crown, Cat ears, Bunny ears,
-  Daisy, Angel halo, Star clips, Sleepy cap, Tiny horns, Heart sprout.
-  All artwork is drawn in the TOP STRIP or SIDE MARGINS, outside the
-  two eyes (approx X 24-58 and 70-104, Y 11-53).
-  While viewing Wardrobe, B SHORT previews next item; B LONG saves
-  your choice and shows SAVED. A short exits to the main menu.
-  Preview changes are not saved until B is held.
+TROUBLESHOOTING
+---------------
+No sound: make sure Settings > Buzzer = ON, Sound Level > 0,
+  GPIO27 connected, common GND present, and the buzzer is passive.
+One monotonous beep instead of notes: likely ACTIVE buzzer; use a
+  passive piezo for melodies.
+Too harsh/loud: lower the Sound Level and/or add a driver/series
+  resistance as appropriate for your piezo's electrical specs.
+PIXO still pets but touching does not always retrigger: TTP223
+  slow-release HIGH behavior is unchanged from v3.
+OLED stops or ESP32 resets: check wiring, buzzer current, supply
+  voltage and shared ground. Never drive a high-current buzzer
+  directly from an ESP32 GPIO.
 
-PERSISTENT MEMORY / UPGRADING FROM v2
-  Uses the existing ESP32 Preferences namespace "pixo".
-  Existing PetProfile structure, PET_VERSION=1 and "profile" key
-  are unchanged. A normal sketch upload should retain v2 birthday,
-  pet count, personality, secrets, accessories and unlocked reactions.
-  New keys "bright" and "night" are independent and backward-safe.
-  Some IDE upload/partition/erase options DO delete NVS; select a
-  normal upload, NOT "Erase All Flash".
-  No SD card is required. As before, recent high-frequency pet stats
-  are batch-saved about every 10s; saving is not instant for every tap.
-
-ORIGINAL PIXO FEATURES PRESERVED
-  Startup: DEVELOPED BY -> Wi-Fi time status -> PIXO logo ->
-  animated eyes pushing logo -> friendly greeting -> birth/age page.
-  Anniversary birthday scene, natural blinking, moving eyes/pupils,
-  petting (^ ^) and hearts, random expressions, headphones/music,
-  football boot kick, dizzy upside-down, peeking, happy dance,
-  star pupils, blush, dreaming/sleeping, sudden wake-up,
-  saved pet age and personality, A+B royal secret.
-
-BUILD / UPLOAD
-  1. Install ESP32 board support in Arduino IDE.
-  2. Install Adafruit GFX Library and Adafruit SSD1306.
-  3. Open PIXO_Pet_Life_Menu_v3.ino in a matching-name folder.
-  4. Set Wi-Fi credentials and PET_OWNER_NAME near top.
-  5. Select your CLASSIC ESP32 board and correct USB port.
-  6. Upload firmware and open Serial Monitor at 115200 if needed.
-  7. Test buttons and screen before assembling the enclosure.
-
-VALIDATION
-  Desktop C++ stub compile and simulated behaviour tests passed:
-  original pet/menu interactions, repeated touch, pet-profile reload,
-  birthday, accessories; new brightness save/cancel and NVS reload;
-  day/night time logic (23:00, 03:00, 07:00, 12:00); safe reset.
-  NOT yet built against your exact ESP32 Arduino installation or
-  verified on actual SSD1306/TTP223 hardware. Test before production.
-
-KNOWN TOUCH LIMITATION
-  A TTP223 sensor with a slow 2-5 second HIGH release cannot detect
-  separate rapid taps during that HIGH period; that is a sensor-output
-  limitation, not corrected by changing menu/brightness firmware.
-  The v2 default 1.15-second petting auto-return is unchanged.
+TESTING NOTE
+-------------
+The source is syntax-checked using simulated Arduino/ESP32 APIs for
+both 2.x and 3.x LEDC paths and checked for menu/audio sequencing;
+it has NOT been compiled on your exact ESP32 Arduino installation or
+verified with your physical buzzer. Sound tone and loudness vary with
+component type and build.
