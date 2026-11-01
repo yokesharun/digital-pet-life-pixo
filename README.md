@@ -1,162 +1,170 @@
-PIXO PET LIFE v5 - WEATHER + SECRETS + FEEDING
-=============================================
-Board: Classic ESP32 38-pin development board
-OLED: SSD1306 128 x 64 (Adafruit_GFX + Adafruit_SSD1306)
-Date/time: Asia/Kolkata (IST, UTC+05:30, no DST)
+PIXO PET LIFE v6 - CUTER REACTIONS + LONGER SECRET SHOWS
+=======================================================
+Version: v6 based directly on the supplied v5 Weather & Secrets firmware
+Target: Classic ESP32 38-pin dev board + 0.96-inch 128x64 SSD1306 OLED
 
-CONTENTS
---------
-- PIXO_Pet_Life_v5_Weather_Secrets.ino (upload using Arduino IDE)
-- PIXO_Pet_Life_v5_Weather_Secrets.txt (same source, in text format)
-- This README.
+FILES
+-----
+PIXO_Pet_Life_v6_Cute_Animations.ino - full Arduino sketch
+PIXO_Pet_Life_v6_Cute_Animations.txt - identical source as plain text
+PIXO_Pet_Life_v6_README.txt - this guide
 
-SETUP BEFORE UPLOAD
--------------------
-Near the top of the .ino file, edit:
-  WIFI_SSID              -> your 2.4 GHz Wi-Fi SSID
-  WIFI_PASSWORD          -> your Wi-Fi password
-  PET_OWNER_NAME         -> the human name PIXO remembers
-  BUZZER_FIXED_HZ        -> defaults to 250 (suggested 200-300 Hz)
-  TEST_MODE_DEFAULT      -> false (developer default)
-  WEATHER_ENABLED        -> true
+WHAT CHANGED IN V6
+------------------
+* User-facing PIXO messages are friendlier and more kawaii. Main menu,
+  daily greeting, food request, and memory cards have been refreshed.
+* Hungry after approximately 5 minutes of play (and again 5 minutes after
+  a feeding or dismissed prompt). The food request dismisses itself after
+  exactly 30 seconds without pressing anything.
+* If PIXO was already asleep when it got hungry, it wakes to ask and, if
+  ignored, settles back to sleep. The prompt is not kept on forever.
+* Auto-sleep starts after 10 minutes of actual inactivity. Random animations
+  do not restart this countdown. A short waking transition remains.
+* Credits/Wi-Fi startup: at least 3.3 seconds plus network status hold.
+  PIXO name page: 2.3 seconds. Hello/introduction: 5.5 seconds.
+  Birthday/profile information: 5.2 seconds.
+  Once-per-day greeting: 5.6 seconds. Birthday show: 14.6 seconds.
+* Birthday and all six other secret event animations run for at least
+  about 12.55 seconds (10 seconds longer than the old 2.55s secret shows).
+  Each has motion across the full duration; Peekaboo repeats hand-covering
+  and sparkle surprises, Alien travels and abducts/returns an eyeball, etc.
+* Strawberry is now plump with leaves and seeds; juice has a straw and
+  bubbles; cake has layers and decorations. Each snack has a little
+  presentation, bites and a thank-you sparkle/heart reaction.
+* Sleeping face now breathes gently, with curved eyelids, blush freckles,
+  a cozy blanket, floating dream bubbles (fish/cake/heart), Zzz and stars.
+* Secret diary has clear three-line hint text and visible status on
+  separate lines with an A/B navigation footer.
+* Sound remains **ON/OFF only**. Each secret uses its own ORIGINAL short
+  melody; birthday is different from the other six. Feeding, hunger,
+  startup, wake-up, sleeping, button presses and headphone animation also
+  have custom sounds. All tunes are non-blocking and may repeat during
+  longer shows. No slider and no stored volume value are added.
+* Everything from v5 is kept: clock with Asia/Kolkata IST, cached Bengaluru
+  weather via Open-Meteo (Wi-Fi only at startup), OLED brightness/night
+  settings, factory reset protection, owner, age/birthday/NVS, two tactile
+  buttons, 12 accessories, test secrets, and first greeting of the day.
+* The physical touch sensor remains REMOVED. GPIO32 stays unused.
 
-Also ensure the board package selected is a compatible classic ESP32 device.
-Install Adafruit GFX Library and Adafruit SSD1306 through Arduino IDE.
-WiFi, WiFiClientSecure, HTTPClient, Wire, time and Preferences are available
-with the ESP32 Arduino board support package.
-
-PIN WIRING - DO NOT CONNECT Buzzer to GPIO32
----------------------------------------------
-OLED SDA             GPIO25
-OLED SCL             GPIO26
-OLED power           3.3V / GND (check module voltage rating)
-Button A (Menu)      GPIO18 <-> switch <-> GND
-Button B (Next/Feed) GPIO19 <-> switch <-> GND
-Piezo buzzer (+)     GPIO27, only for a SMALL LOW-CURRENT PASSIVE PIEZO
-Piezo buzzer (-)     Common GND
-Old touch input     GPIO32 UNUSED / disconnected
-
-Buttons are momentary 4-pin tactile switches. Connect one leg from each
-ELECTRICAL SIDE of the switch, NOT two internally tied legs. Test with a
-multimeter. Firmware uses INPUT_PULLUP; no added button resistors needed.
-Wire everything with power OFF.
-
-BUZZER IMPORTANT
+BEFORE UPLOADING
 ----------------
-A passive piezo transducer is needed for clean PWM at 250 Hz. There is NO
-volume slider: the saved setting is Sounds ON/OFF. All effects use the SAME
-250 Hz pitch with different beep durations and pauses. Lower pitch does not
-guarantee more loudness, and most piezos are louder near their rated resonant
-frequency (often several kHz). If still quiet, use a suitable buzzer/driver
-and enclosure design. Do NOT draw more than safe ESP32 GPIO current through
-the output; higher-current buzzers need a transistor driver and appropriate
-power supply. Active buzzers have their own fixed pitch and may not reproduce
-an externally driven 250 Hz tone faithfully.
+At the very top of the .ino code set:
+  const char WIFI_SSID[] = "YOUR_2.4_GHZ_WIFI";
+  const char WIFI_PASSWORD[] = "YOUR_WIFI_PASSWORD";
+  const char PET_OWNER_NAME[] = "YOUR NAME";
+Optional developer setting:
+  constexpr bool TEST_MODE_DEFAULT = false;
 
-MENU AND BUTTONS
+Be aware: TEST_MODE_DEFAULT is only the default for a FRESH flash profile.
+If you already toggled Test Secrets in PIXO Settings, its previously saved
+NVS setting takes precedence. Disable using the menu if needed.
+
+Arduino IDE: select your classic ESP32 board; install Adafruit GFX and
+Adafruit SSD1306 libraries. ESP32 Arduino provides Wire, WiFi, Preferences,
+HTTPClient, WiFiClientSecure, time and LEDC tone support.
+
+WIRING (unchanged from v5)
+-------------------------
+OLED  SDA -> GPIO25
+OLED  SCL -> GPIO26
+OLED  VCC -> 3.3V (if your OLED module supports it)
+OLED  GND -> ESP32 GND
+Button A -> GPIO18 to GND, momentary tactile switch, INPUT_PULLUP
+Button B -> GPIO19 to GND, momentary tactile switch, INPUT_PULLUP
+PASSIVE low-current piezo buzzer + -> GPIO27, negative -> GND
+Old touch module -> disconnected (GPIO32 is UNUSED)
+
+For 4-pin tactile buttons, use one pin from each DIFFERENT electrical pair.
+The two pins along the same internally joined side will not work as a
+button contact. Use a continuity tester to verify leg pair selection.
+Disconnect power when rewiring.
+
+SOUND AND VOLUME
 ----------------
-A short (when awake): Open menu / Back / Cancel
-A long:           Return to PIXO face
-B short (menu):   Next item, page or setting value
-B long  (menu):   Open item, preview secret, save accessory / setting
-A + B together:  PEEKABOO secret; at 00:00-00:14 IST triggers MIDNIGHT GHOST
-B short (face):   FEED when PIXO is asking for food
-A or B from sleep: Wake PIXO; then use buttons normally
+Sound ON/OFF is in Settings > Buzzer. B tap toggles, B long saves, A cancels.
+The buzzer must be PASSIVE for melodies to change pitch. Frequencies used
+range roughly 220-784 Hz with different rhythms. If your hardware has an
+ACTIVE buzzer (built-in oscillator), it may produce a single beep or no
+recognizable melody. GPIO PWM cannot guarantee loudness; many small
+piezo elements are louder near their rated resonance. To get more volume,
+use a suitably rated buzzer module and/or transistor driver circuit rather
+than forcing high current through an ESP32 output. Never connect a buzzer
+that exceeds safe GPIO current directly.
+
+BUTTON GUIDE
+------------
+A short         Open menu / Back
+A long          Return to PIXO face
+B short         Next page / next setting; when hungry and on PIXO face, FEED
+B long          Select / save current menu item
+A + B together  Secret PEEKABOO; midnight 00:00-00:14 IST -> MIDNIGHT GHOST
+While sleeping  Press A or B to wake; wait for wake animation to end
 
 MAIN MENU
-  1 My PIXO   - age, original birthday, affection, petting history, outfit,
-                play-day streak, last played day, owner and favourite reaction
-  2 Calendar - B hold shows BANGALORE / TODAY for 3 seconds, then Weather
-                for 3 seconds, then returns to the PIXO face
-  3 Battery  - placeholder, as requested
-  4 Secrets  - page through seven secrets and their unlock clues
-  5 Wardrobe - B tap previews; B hold equips/saves; bottom banner alternates
-                between accessory name and "B:NEXT HOLD:SAVE"
-  6 Weather  - B hold previews cached Bengaluru conditions for 3 seconds
-  7 Settings - Brightness, Auto night, Buzzer ON/OFF, Clock sync, Owner,
-                Memory, Test secrets and Factory reset
+---------
+1 My PIXO   - first activation birthday, age, affection, petting history,
+              growth stage, secrets count, owner and favourite reaction
+2 Calendar  - BANGALORE / TODAY for 3s -> Weather for 3s -> PIXO face
+3 Battery   - placeholder; no battery percentage feature yet
+4 Secrets   - use B short to browse readable hints / lock status
+5 Wardrobe  - B short to preview; B long to equip and save
+6 Weather   - cached Bengaluru temperature/conditions (3s preview)
+7 Settings  - OLED brightness, 10 PM-7 AM night mode, Buzzer ON/OFF,
+              clock sync info, owner/memory, test secrets, factory reset
 
-SETTINGS
---------
-- Brightness: B short cycles MOON / SOFT / COZY / BRIGHT / MAX;
-  B long saves to Preferences.
-- Auto night: B short toggles, B long saves. The screen dims 22:00 to 07:00
-  using the synced Asia/Kolkata clock, and restores normal brightness at 07:00.
-- Buzzer: B short toggles ON/OFF, B long saves. No volume control exists.
-- Test secrets: B short toggles ON/OFF, B long saves. When enabled,
-  My PIXO > Secrets allows B long to PREVIEW the selected secret. Preview
-  does not forge a birthday or award a permanent time-based milestone.
-- Factory reset: Settings > Factory reset > B short to ARM, then hold B
-  for 3 seconds to erase the PIXO NVS namespace and restart. THIS IS
-  DESTRUCTIVE and resets birthday, growth, accessories and unlocked secrets.
+HUNGER / SLEEP LOGIC
+--------------------
+HUNGER_INTERVAL_MS = 300000 (5 minutes)
+HUNGER_PROMPT_MS   = 30000  (30 seconds)
+IDLE_SLEEP_MS      = 600000 (10 minutes)
 
-WEATHER AND TIME
-----------------
-- Weather data: Open-Meteo's current forecast endpoint for approximate
-  Bengaluru city-centre latitude 12.9716, longitude 77.5946.
-- Fetch once during startup after NTP obtains the correct time, cache in
-  ESP32 Preferences, and turn Wi-Fi off.
-- Display: temperature in Celsius, condition, wind km/h.
-- When the network fails or cache isn't for the current date, the page
-  displays WEATHER UNAVAILABLE / Sync WiFi next boot.
-- The first power-on with valid internet time permanently sets PIXO's
-  birthday in flash memory. Normal software uploads preserve the NVS data.
-- If time synchronization fails, PIXO runs but birthday/clock-based
-  achievements need a successful Wi-Fi sync. No fake local date is stored.
-- Weather is a single startup snapshot, NOT a continuously refreshed feed.
-  Reboot to fetch again. It can become stale while PIXO remains running.
-- For this prototype, the HTTPS weather request uses setInsecure() for a
-  public (non-sensitive) weather endpoint. A product should validate TLS
-  certificates properly.
-- Open-Meteo's no-key free tier is for NON-COMMERCIAL use, subject to its
-  terms and attribution requirements. Check commercial API licensing before
-  using it in PIXO devices intended for sale:
-  https://open-meteo.com/en/terms
-  https://open-meteo.com/en/docs
+You can adjust these constants near the top of the file. Hunger displays
+an owner-specific cute request on PIXO's main face. Press B briefly to
+feed one of 3 rotating/random foods. The food animation runs ~4.3 seconds
+and affection increases by 3 (up to 100). If not fed within 30 seconds,
+PIXO stops asking without reducing affection or clearing memories.
 
-PIXO FEEDING
+SECRETS (ORIGINAL UNLOCK RULES KEPT)
+-----------------------------------
+Peekaboo: A+B anytime (except midnight ghost window).
+Birthday: first-activation anniversary; celebratory cake (14.6s).
+Alien Invasion: rare daily chance after age 21 days.
+Angel Mode: age 365 days.
+Midnight Ghost: A+B between midnight and 00:14 IST.
+Royal PIXO: age 7, 14, 30, 90, 180 and 270 days.
+Best Friend: age 365 days; bee friend stays on normal PIXO face.
+Each non-birthday secret animation lasts 12.55 seconds.
+
+Settings > Test secrets > ON permits previewing a selected secret by
+holding B in its Secrets page, WITHOUT permanently awarding age-based
+secret badges. NVS pet stats and original activation day remain unchanged.
+
+FACTORY RESET WARNING
+---------------------
+Settings > Factory reset > B short ARM > B hold continuously for 3 seconds
+will ERASE the PIXO memory namespace. This includes original birthday,
+affection, lifetime progress, personal preferences and accessory unlocks.
+The firmware never resets this data automatically. Use deliberately.
+
+TIME / WEATHER
+--------------
+TZ config: Asia/Kolkata; POSIX string IST-5:30 (UTC+05:30).
+Wi-Fi starts once at boot, syncs time using NTP, fetches today's Bengaluru
+weather from Open-Meteo, then switches off. Weather is a startup snapshot.
+Offline/failed sync shows a gentle weather-unavailable notice. The first
+valid synced calendar date is saved permanently as PIXO's birthday.
+Open-Meteo's free no-key service is generally for non-commercial use under
+its terms. For commercial products, verify API license and attribution.
+Prototype HTTPS currently does not validate the API's certificate; enable
+certificate verification and review timeouts for a production device.
+
+VERIFICATION
 ------------
-- Once every now-and-then period, PIXO says '<owner>, I'M HUNGRY!'
-- When hungry, SHORT press B from the normal face to feed strawberry, juice
-  or cake. The feeding animation increases affection and stores feed count.
-- If ignored, PIXO goes back to sleep after the prompt period. It may wake
-  occasionally to ask again later. Avoid feeding while a menu is open.
-- Hungry prompt interval for regular play starts after about 15-30 min,
-  subsequently 40-90 min. In test mode it is faster.
-- Earlier v4 "total petting" history is preserved. Since the physical touch
-  sensor was removed, feeding grows affection independently; it does NOT
-  invent past touch interactions.
-
-SECRETS (7 ENTRIES)
--------------------
-1 PEEKABOO       A+B (hands cover eyes, pause, open eyes, sparkle).
-2 PIXO BIRTHDAY  Original first-activation anniversary (cake+confetti).
-3 ALIEN INVASION Rare chance per eligible day, beginning at age >=21 days.
-                  UFO abducts one eye and returns it silly/upside-down.
-4 ANGEL MODE     >=365 full calendar days since activation.
-5 MIDNIGHT GHOST A+B between 00:00 and 00:14 IST (touch hardware removed).
-6 ROYAL PIXO     Celebration milestones at 7, 14, 30, 90, 180, 270 days.
-7 BEST FRIEND    >=365 days; a little bee becomes PIXO's companion.
-
-All real unlock flags and milestones save in Preferences. Age is based on
-calendar days since the ORIGINAL first activation, not boot count or time
-powered on. First daily startup includes a pleasant morning/afternoon/
-evening/night greeting using the saved owner name. The last-greeted date is
-stored so it only appears once per local calendar day.
-
-Existing blinking, happy dance, football eyes, upside-down, sleeping dream
-bubbles, cat/bunny ears, wardrobe, heart balloons, birthday and the original
-protected memories remain in the sketch. The TTP223 GPIO32 input/polling
-and direct-touch feature have been removed.
-
-TESTING AND KNOWN LIMITS
-------------------------
-The code has passed desktop C++ syntax checking against MOCK ESP32/Adafruit
-interfaces for Arduino-ESP32 2.x and 3.x, and simulated flows for feeding,
-menus, secrets, weather JSON extraction and birthday calculations. It has
-NOT been built in a real Arduino IDE/ESP32 toolchain or tested on your exact
-OLED, buttons and buzzer. Verify hardware response and font clipping.
-
+Mock C++ integration tests were run on Arduino-ESP32 2.x and 3.x interface
+simulations: button pin assignments, melody selection, settings preservation,
+5-minute scheduling, 30-second hunger timeout, 10-minute inactivity sleep,
+return to sleep when ignored, feeding from B button, 3s calendar/weather,
+12.55-second secret exit and animation drawing. No physical ESP32 or
+actual Arduino IDE library compilation is claimed. Please upload/test on
+your specific display and buzzer; adjust visual clipping if needed.
 Serial Monitor: 115200 baud.
-For help, first confirm the exact ESP32 board, OLED controller and whether
-the buzzer is PASSIVE or ACTIVE, as that affects actual sound output.
