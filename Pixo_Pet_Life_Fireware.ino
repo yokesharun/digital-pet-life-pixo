@@ -1,5 +1,5 @@
 /*
-  PIXO - Pet Life v3: OLED contrast, auto night, polished menus,
+  PIXO - Pet Life v4: OLED contrast, auto night, nonblocking kawaii buzzer,
   protected NVS factory reset, 12 non-overlapping cute accessories.
   Built on PIXO_Lively_WiFi_Clock.ino; OLED 128x64 classic ESP32.
   Based on PIXO_Touch_AutoReturn.ino; retains original eye drawing,
@@ -46,6 +46,13 @@
 #include <time.h>
 #include <stdio.h>
 #include <Preferences.h>
+// LEDC pin-vs-channel API changed in Arduino-ESP32 3.x.
+#if __has_include(<esp_arduino_version.h>)
+  #include <esp_arduino_version.h>
+#endif
+#ifndef ESP_ARDUINO_VERSION_MAJOR
+  #define ESP_ARDUINO_VERSION_MAJOR 2
+#endif
 
 // ======================== USER SETTINGS =============================
 // Wi-Fi is used ONLY during startup to set the ESP32 internal time.
@@ -57,6 +64,17 @@ const char WIFI_PASSWORD[] = "";      // <-- Enter your password
 const char PET_OWNER_NAME[] = "MY HUMAN";  // <--- EDIT OWNER NAME HERE
 constexpr uint8_t BUTTON_A_PIN = 18;      // MENU / BACK, to GND
 constexpr uint8_t BUTTON_B_PIN = 19;      // NEXT / SELECT, to GND
+// PASSIVE (non-self-oscillating) piezo ONLY for tunable melodies/volume.
+// GPIO32 is ALREADY the TTP223 touch input: DO NOT put a buzzer there!
+// 2-wire passive piezo: + -> GPIO27; - -> shared GND.
+// Use an NPN driver for modules drawing more current than a GPIO can safely source.
+constexpr uint8_t BUZZER_PIN = 27;
+constexpr bool BUZZER_ENABLED_DEFAULT = true;
+constexpr uint8_t BUZZER_VOLUME_DEFAULT = 2; // 0..4; 0=mute
+constexpr uint8_t BUZZER_MAX_VOLUME = 4;
+constexpr uint8_t BUZZER_LEDC_CHANNEL = 5; // Arduino-ESP32 2.x only
+constexpr uint8_t BUZZER_PWM_BITS = 10;    // 0..1023 PWM duty
+// Kawaii melodies are original little tone sequences (not a prerecorded song).
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 22;
 constexpr uint32_t BUTTON_LONG_MS = 750;
 constexpr uint32_t PROFILE_AUTOSAVE_MS = 10000;
@@ -282,17 +300,163 @@ uint8_t savedBrightnessLevel = DEFAULT_BRIGHTNESS_LEVEL;
 bool autoNightMode = DEFAULT_AUTO_NIGHT_MODE;
 uint8_t editBrightnessLevel = DEFAULT_BRIGHTNESS_LEVEL;
 bool editAutoNightMode = DEFAULT_AUTO_NIGHT_MODE;
+// Separate NVS keys preserve all existing v2/v3 pet memory without migration.
+bool buzzerEnabled = BUZZER_ENABLED_DEFAULT;
+uint8_t buzzerVolume = BUZZER_VOLUME_DEFAULT;
+bool editBuzzerEnabled = BUZZER_ENABLED_DEFAULT;
+uint8_t editBuzzerVolume = BUZZER_VOLUME_DEFAULT;
 bool contrastInitialized = false;
 uint8_t lastAppliedContrast = 0;
 
-enum class SettingsView : uint8_t { LIST, BRIGHTNESS, AUTO_NIGHT, CLOCK, OWNER, MEMORY, RESET };
+enum class SettingsView : uint8_t { LIST, BRIGHTNESS, AUTO_NIGHT, BUZZER_ENABLE, BUZZER_VOLUME, CLOCK, OWNER, MEMORY, RESET };
 SettingsView settingsView = SettingsView::LIST;
 uint8_t settingsIndex = 0;
 uint8_t wardrobePreview = 0; // B tap browses; B long equips and saves
 bool resetArmed = false;
-const char* const SETTINGS_ITEMS[] = {"Brightness", "Auto night", "Clock sync", "Pet owner", "Pet memory", "Factory reset"};
-const char* const SETTINGS_SUBTITLES[] = {"OLED contrast", "22:00 to 07:00", "Internet time", "Saved pet owner", "Saved progress", "Erase pet data"};
+const char* const SETTINGS_ITEMS[] = {
+  "Brightness", "Auto night", "Buzzer", "Sound level",
+  "Clock sync", "Pet owner", "Pet memory", "Factory reset"
+};
+const char* const SETTINGS_SUBTITLES[] = {
+  "OLED contrast", "22:00 to 07:00", "Cute sounds ON/OFF",
+  "Volume 0 to 4", "Internet time", "Saved pet owner",
+  "Saved progress", "Erase pet data"
+};
 constexpr uint8_t SETTINGS_COUNT = sizeof(SETTINGS_ITEMS)/sizeof(SETTINGS_ITEMS[0]);
+
+
+// ======================= PIXO SOUND ENGINE ===========================
+// Nonblocking: no delay() or tone() calls in the animation loop.
+// Each note is (frequency in Hz, duration in milliseconds). 0 Hz is a rest.
+// Uses LEDC PWM; duty changes the strength of a passive piezo's fundamental
+// tone, but this is NOT a calibrated acoustic dB/percentage volume control.
+struct PixoNote { uint16_t hz; uint16_t ms; };
+
+// Original little PIXO greeting: bouncy arpeggios plus a falling sparkle.
+const PixoNote STARTUP_TUNE[] = {
+  {659,105},{0,32},{784,125},{988,140},{0,45},
+  {1175,180},{988,105},{1319,260},{0,65},{1568,200},
+  {1319,140},{1175,240}
+};
+const PixoNote WAKE_TUNE[] = {
+  {784,75},{1047,80},{1319,95},{1568,155}
+};
+const PixoNote SLEEP_TUNE[] = {
+  {659,115},{587,155},{494,210},{392,280},{0,120}
+};
+// Occasional VERY soft sleeping purr. Only one short sound every 25-45 s.
+const PixoNote DREAM_TUNE[] = {{392,85},{0,50},{330,105}};
+const PixoNote BUTTON_A_TUNE[] = {{784,44},{587,52}};
+const PixoNote BUTTON_B_TUNE[] = {{988,52},{1319,68}};
+const PixoNote PET_TUNE[] = {{1319,58},{1568,78}};
+const PixoNote SECRET_TUNE[] = {{784,90},{988,95},{1175,95},{1568,240}};
+const PixoNote BIRTHDAY_TUNE[] = {
+  {784,115},{988,115},{1175,150},{0,80},
+  {1047,125},{1319,150},{1568,310}
+};
+// Original playful tune for the headphones animation, ~2.6 seconds.
+const PixoNote MUSIC_TUNE[] = {
+  {523,145},{659,145},{784,145},{1047,180},{0,70},
+  {988,155},{784,145},{659,145},{784,190},{0,65},
+  {587,140},{784,140},{988,180},{1175,260}
+};
+const PixoNote VOLUME_PREVIEW_TUNE[] = {{1047,105},{1319,150}};
+
+enum class SoundID : uint8_t {
+  NONE, STARTUP, WAKE, SLEEP, DREAM, BUTTON_A, BUTTON_B, PET,
+  MUSIC, SECRET, BIRTHDAY, PREVIEW
+};
+SoundID activeSound = SoundID::NONE;
+const PixoNote* activeNotes = nullptr;
+uint8_t activeNoteCount = 0;
+uint8_t activeNoteIndex = 0;
+uint32_t activeNoteBegan = 0;
+uint32_t nextDreamChirp = 0;
+bool buzzerReady = false;
+bool forceSoundPreview = false;
+// Volume steps are intentionally gentle. A passive piezo's loudness is not
+// linear in PWM duty; actual results vary by transducer and enclosure.
+const uint16_t SOUND_DUTY[] = {0, 22, 65, 145, 325};
+
+void buzzerPwmSet(uint16_t frequency, uint8_t volume) {
+  if(!buzzerReady) return;
+  if(frequency==0 || volume==0) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    ledcWrite(BUZZER_PIN,0);
+#else
+    ledcWrite(BUZZER_LEDC_CHANNEL,0);
+#endif
+    return;
+  }
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWriteTone(BUZZER_PIN,frequency);
+  ledcWrite(BUZZER_PIN,SOUND_DUTY[volume]);
+#else
+  ledcWriteTone(BUZZER_LEDC_CHANNEL,frequency);
+  ledcWrite(BUZZER_LEDC_CHANNEL,SOUND_DUTY[volume]);
+#endif
+}
+void buzzerHalt() {
+  buzzerPwmSet(0,0);
+  activeSound=SoundID::NONE;
+  activeNotes=nullptr;
+  activeNoteCount=0;
+  forceSoundPreview=false;
+}
+void buzzerInit() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  buzzerReady=ledcAttach(BUZZER_PIN,1600,BUZZER_PWM_BITS);
+#else
+  ledcSetup(BUZZER_LEDC_CHANNEL,1600,BUZZER_PWM_BITS);
+  ledcAttachPin(BUZZER_PIN,BUZZER_LEDC_CHANNEL);
+  buzzerReady=true;
+#endif
+  buzzerPwmSet(0,0);
+  if(!buzzerReady) Serial.println(F("PIXO: buzzer PWM setup failed"));
+}
+void buzzerPlay(SoundID id,uint32_t now,bool preview=false) {
+  if(!buzzerReady || ((!buzzerEnabled || buzzerVolume==0) && !preview)) return;
+  if(preview && (!editBuzzerEnabled || editBuzzerVolume==0)) {
+    buzzerHalt();return;
+  }
+  switch(id) {
+    case SoundID::STARTUP: activeNotes=STARTUP_TUNE;activeNoteCount=sizeof(STARTUP_TUNE)/sizeof(PixoNote);break;
+    case SoundID::WAKE: activeNotes=WAKE_TUNE;activeNoteCount=sizeof(WAKE_TUNE)/sizeof(PixoNote);break;
+    case SoundID::SLEEP: activeNotes=SLEEP_TUNE;activeNoteCount=sizeof(SLEEP_TUNE)/sizeof(PixoNote);break;
+    case SoundID::DREAM: activeNotes=DREAM_TUNE;activeNoteCount=sizeof(DREAM_TUNE)/sizeof(PixoNote);break;
+    case SoundID::BUTTON_A: activeNotes=BUTTON_A_TUNE;activeNoteCount=sizeof(BUTTON_A_TUNE)/sizeof(PixoNote);break;
+    case SoundID::BUTTON_B: activeNotes=BUTTON_B_TUNE;activeNoteCount=sizeof(BUTTON_B_TUNE)/sizeof(PixoNote);break;
+    case SoundID::PET: activeNotes=PET_TUNE;activeNoteCount=sizeof(PET_TUNE)/sizeof(PixoNote);break;
+    case SoundID::MUSIC: activeNotes=MUSIC_TUNE;activeNoteCount=sizeof(MUSIC_TUNE)/sizeof(PixoNote);break;
+    case SoundID::SECRET: activeNotes=SECRET_TUNE;activeNoteCount=sizeof(SECRET_TUNE)/sizeof(PixoNote);break;
+    case SoundID::BIRTHDAY: activeNotes=BIRTHDAY_TUNE;activeNoteCount=sizeof(BIRTHDAY_TUNE)/sizeof(PixoNote);break;
+    case SoundID::PREVIEW: activeNotes=VOLUME_PREVIEW_TUNE;activeNoteCount=sizeof(VOLUME_PREVIEW_TUNE)/sizeof(PixoNote);break;
+    default: buzzerHalt();return;
+  }
+  activeSound=id;
+  activeNoteIndex=0;
+  activeNoteBegan=now;
+  forceSoundPreview=preview;
+  buzzerPwmSet(activeNotes[0].hz,id==SoundID::DREAM ? 1 :
+               (preview?editBuzzerVolume:buzzerVolume));
+}
+void buzzerUpdate(uint32_t now) {
+  if(activeSound==SoundID::NONE) return;
+  if(!forceSoundPreview && (!buzzerEnabled || buzzerVolume==0)) {
+    buzzerHalt();return;
+  }
+  if(forceSoundPreview && (!editBuzzerEnabled || editBuzzerVolume==0)) {
+    buzzerHalt();return;
+  }
+  // Advance with bounded work; keeps eye animations, Wi-Fi and buttons live.
+  if(now-activeNoteBegan>=activeNotes[activeNoteIndex].ms) {
+    ++activeNoteIndex;
+    if(activeNoteIndex>=activeNoteCount) {buzzerHalt();return;}
+    activeNoteBegan=now;
+    buzzerPwmSet(activeNotes[activeNoteIndex].hz,activeSound==SoundID::DREAM ? 1 :
+                 (forceSoundPreview?editBuzzerVolume:buzzerVolume));
+  }
+}
 
 bool inSettingsDetail() {return state==State::MENU && menuDetail && menuIndex==5;}
 // Saved contrast always returns after exiting preview; night mode only works
@@ -323,6 +487,11 @@ void loadDisplayPreferences() {
   autoNightMode=petPrefs.getBool("night",DEFAULT_AUTO_NIGHT_MODE);
   editBrightnessLevel=savedBrightnessLevel;
   editAutoNightMode=autoNightMode;
+  buzzerEnabled=petPrefs.getBool("sndon",BUZZER_ENABLED_DEFAULT);
+  buzzerVolume=petPrefs.getUChar("sndvol",BUZZER_VOLUME_DEFAULT);
+  if(buzzerVolume>BUZZER_MAX_VOLUME) buzzerVolume=BUZZER_VOLUME_DEFAULT;
+  editBuzzerEnabled=buzzerEnabled;
+  editBuzzerVolume=buzzerVolume;
 }
 
 
@@ -1261,6 +1430,20 @@ void drawSettingsPage(uint32_t now) {
     uiValue(8,28,editAutoNightMode ? "ON" : "OFF");
     uiLabel(6,45,clockSynced?"Uses internet clock":"Needs time sync");
     uiFooter("A:BACK","B:TOGG","H:SAVE");
+  } else if(settingsView==SettingsView::BUZZER_ENABLE) {
+    uiHeader("PIXO SOUNDS",5,"AUDIO");
+    uiLabel(6,17,"CUTE CHIRPS & MUSIC");
+    uiValue(8,29,editBuzzerEnabled ? "ON" : "OFF");
+    uiLabel(6,46,"Tap B to toggle");
+    uiFooter("A:BACK","B:TOGG","H:SAVE");
+  } else if(settingsView==SettingsView::BUZZER_VOLUME) {
+    uiHeader("SOUND LEVEL",5,"0-4");
+    uiLabel(6,17,editBuzzerEnabled?"PIEZO PWM VOLUME":"SOUND CURRENTLY OFF");
+    char levelLabel[17];
+    snprintf(levelLabel,sizeof(levelLabel),"LEVEL %u",(unsigned)editBuzzerVolume);
+    uiValue(6,28,levelLabel);
+    uiMiniBar(6,46,115,editBuzzerVolume,BUZZER_MAX_VOLUME);
+    uiFooter("A:BACK","B:TEST","H:SAVE");
   } else if(settingsView==SettingsView::CLOCK) {
     uiHeader("CLOCK SYNC",1);
     uiLabel(7,19,clockSynced?"INTERNET TIME READY":"TIME NOT SYNCED");
@@ -1357,6 +1540,16 @@ void menuNext(uint32_t now) {
       case SettingsView::LIST: settingsIndex=(settingsIndex+1)%SETTINGS_COUNT;break;
       case SettingsView::BRIGHTNESS: editBrightnessLevel=(editBrightnessLevel+1)%BRIGHTNESS_LEVEL_COUNT;break;
       case SettingsView::AUTO_NIGHT: editAutoNightMode=!editAutoNightMode;break;
+      case SettingsView::BUZZER_ENABLE:
+        editBuzzerEnabled=!editBuzzerEnabled;
+        // Preview when toggling ON; no sound at all when toggled OFF.
+        if(editBuzzerEnabled) buzzerPlay(SoundID::PREVIEW,now,true);
+        else buzzerHalt();
+        break;
+      case SettingsView::BUZZER_VOLUME:
+        editBuzzerVolume=(editBuzzerVolume+1)%(BUZZER_MAX_VOLUME+1);
+        buzzerPlay(SoundID::PREVIEW,now,true);
+        break;
       case SettingsView::RESET: resetArmed=!resetArmed;break;
       default:break;
     }
@@ -1376,6 +1569,8 @@ void menuSelect(uint32_t now) {
       settingsView=(SettingsView)(settingsIndex+1);
       if(settingsView==SettingsView::BRIGHTNESS)editBrightnessLevel=savedBrightnessLevel;
       if(settingsView==SettingsView::AUTO_NIGHT)editAutoNightMode=autoNightMode;
+      if(settingsView==SettingsView::BUZZER_ENABLE)editBuzzerEnabled=buzzerEnabled;
+      if(settingsView==SettingsView::BUZZER_VOLUME)editBuzzerVolume=buzzerVolume;
       if(settingsView==SettingsView::RESET)resetArmed=false;
     } else if(settingsView==SettingsView::BRIGHTNESS) {
       savedBrightnessLevel=editBrightnessLevel;
@@ -1387,6 +1582,18 @@ void menuSelect(uint32_t now) {
       petPrefs.putBool("night",autoNightMode);
       settingsView=SettingsView::LIST;
       Serial.println(F("PIXO automatic night saved"));
+    } else if(settingsView==SettingsView::BUZZER_ENABLE) {
+      buzzerEnabled=editBuzzerEnabled;
+      petPrefs.putBool("sndon",buzzerEnabled);
+      settingsView=SettingsView::LIST;
+      if(!buzzerEnabled) buzzerHalt();
+      Serial.println(F("PIXO buzzer ON/OFF saved"));
+    } else if(settingsView==SettingsView::BUZZER_VOLUME) {
+      buzzerVolume=editBuzzerVolume;
+      petPrefs.putUChar("sndvol",buzzerVolume);
+      settingsView=SettingsView::LIST;
+      buzzerHalt();
+      Serial.println(F("PIXO buzzer volume saved"));
     }
   }
 }
@@ -1399,6 +1606,9 @@ void menuBack(uint32_t now) {
     settingsView=SettingsView::LIST;
     editBrightnessLevel=savedBrightnessLevel;
     editAutoNightMode=autoNightMode;
+    editBuzzerEnabled=buzzerEnabled;
+    editBuzzerVolume=buzzerVolume;
+    if(forceSoundPreview) buzzerHalt();
     resetArmed=false;
     return;
   }
@@ -1430,14 +1640,19 @@ bool isIntroState(State st) {
 void buttonShort(ButtonReader &b,uint32_t now) {
   if(isIntroState(state)) return;
   notePlayedToday();
+  const bool soundEditor=inSettingsDetail() &&
+    (settingsView==SettingsView::BUZZER_ENABLE || settingsView==SettingsView::BUZZER_VOLUME);
   if(b.pin==BUTTON_A_PIN) menuBack(now);
   else if(state==State::MENU) menuNext(now);
+  if(!soundEditor) buzzerPlay(b.pin==BUTTON_A_PIN?SoundID::BUTTON_A:SoundID::BUTTON_B,now);
 }
 void buttonLong(ButtonReader &b,uint32_t now) {
   if(isIntroState(state)) return;
   notePlayedToday();
   if(b.pin==BUTTON_A_PIN) menuHome(now);
   else if(state==State::MENU) menuSelect(now);
+  if(buzzerEnabled && buzzerVolume>0)
+    buzzerPlay(b.pin==BUTTON_A_PIN?SoundID::BUTTON_A:SoundID::BUTTON_B,now);
 }
 void scanButton(ButtonReader &b,uint32_t now) {
   bool raw=(digitalRead(b.pin)==LOW);
@@ -1795,6 +2010,21 @@ void setState(State next, uint32_t now) {
   const State old=state;
   state=next;
   stateStarted=now;
+  if(next!=old) {
+    switch(next) {
+      case State::INTRO_BOX: buzzerPlay(SoundID::STARTUP,now);break;
+      case State::INTRO_BIRTHDAY: buzzerPlay(SoundID::BIRTHDAY,now);break;
+      case State::WAKING: buzzerPlay(SoundID::WAKE,now);break;
+      case State::DROWSY: buzzerPlay(SoundID::SLEEP,now);break;
+      case State::MUSIC: buzzerPlay(SoundID::MUSIC,now);break;
+      case State::SECRET_REACTION: buzzerPlay(SoundID::SECRET,now);break;
+      case State::SLEEP:
+        buzzerHalt();
+        nextDreamChirp=now+(uint32_t)random(25000,45001);
+        break;
+      default:break;
+    }
+  }
 
   if (next==State::NORMAL) {
     // Only reboot/wake finishing starts a new idle window. An automatic
@@ -1996,6 +2226,10 @@ void updateState(uint32_t now) {
       if (dt>=DROWSY_MS) setState(State::SLEEP,now);
       break;
     case State::SLEEP:
+      if(reached(now,nextDreamChirp)) {
+        buzzerPlay(SoundID::DREAM,now);
+        nextDreamChirp=now+(uint32_t)random(25000,45001);
+      }
       break;
     case State::WAKING:
       if (dt>=WAKE_MS) {
@@ -2057,6 +2291,9 @@ void updateTouch(uint32_t now) {
       } else {
         startPet(now);
       }
+      // A short happy chirp for petting; never replays any intro.
+      if((state==State::PET) && !petAfterWake)
+        buzzerPlay(SoundID::PET,now);
     } else {
       if (state==State::CALENDAR) {
         setState(State::NORMAL,now);
@@ -2196,6 +2433,7 @@ void setup() {
   display.setTextWrap(false);
   randomSeed(esp_random());
   loadPetMemory();
+  buzzerInit();  // GPIO27, separate from TTP223 on GPIO32
   updateDisplayContrast(); // use saved level immediately, even during intro
   startIntroAtBoot(millis());
   beginIntroWiFi(millis());
@@ -2206,6 +2444,7 @@ void loop() {
   updateIntroWiFi(now);     // Startup-only network time sync; Wi-Fi then OFF
   updateDisplayContrast();  // only sends commands when contrast actually changes
   updateButtons(now);        // 2 tactile menu keys, non-blocking and debounced
+  buzzerUpdate(now);       // nonblocking PWM tone sequencer
   updateTouch(now);          // Existing touch petting behaviour
   checkPetDateDuringRuntime(now);
   updateState(now);
