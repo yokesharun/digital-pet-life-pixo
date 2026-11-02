@@ -1,9 +1,10 @@
 /*
- PIXO Pet Life v6 - longer kawaii shows, expressive sleepy face, feeding,
- simplified 250Hz beep, first-start-of-day greetings and no touch sensor.
+ PIXO Pet Life v6.1 - restores external TTP223 petting touch sensor.
+ Keeps v6 kawaii animations, feeding, weather, menus, memories and buzzer.
  Classic ESP32 38-pin + SSD1306 128x64 I2C. GPIO25 SDA, GPIO26 SCL;
  A on GPIO18->GND, B on GPIO19->GND; passive piezo on GPIO27->GND.
- No connection is required on GPIO32. All pre-existing pet NVS data is kept.
+ TTP223: OUT->GPIO32, VCC->3V3, GND->GND (momentary, active HIGH).
+ Existing ESP32 NVS memory is preserved.
 */
 
 #include <Arduino.h>
@@ -38,8 +39,13 @@ const char WIFI_PASSWORD[] = "";      // <-- Enter your password
 const char PET_OWNER_NAME[] = "MY HUMAN";  // <--- EDIT OWNER NAME HERE
 constexpr uint8_t BUTTON_A_PIN = 18;      // MENU / BACK, to GND
 constexpr uint8_t BUTTON_B_PIN = 19;      // NEXT / SELECT, to GND
+constexpr uint8_t TOUCH_PIN = 32;         // TTP223 OUT; sensor VCC to 3V3
+constexpr uint8_t TOUCH_ACTIVE_LEVEL = HIGH; // default TTP223 momentary output
+constexpr uint32_t TOUCH_DEBOUNCE_MS = 18;
+constexpr uint32_t PET_AFTER_TOUCH_MS = 1150; // ends even if TTP223 OUT stays HIGH
+constexpr bool TOUCH_SERIAL_DEBUG = false;   // enable for TOUCH DOWN/UP at 115200
 // Use a low-current PASSIVE piezo for fixed 250 Hz output.
-// GPIO32 is now UNUSED; old touch sensor has been completely removed.
+// TTP223 touch sensor on GPIO32. This is a digital input, NOT touchRead().
 // 2-wire passive piezo: + -> GPIO27; - -> shared GND.
 // Use an NPN driver for modules drawing more current than a GPIO can safely source.
 constexpr uint8_t BUZZER_PIN = 27;
@@ -81,14 +87,14 @@ constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 9000;
 constexpr uint32_t NTP_SYNC_TIMEOUT_MS = 5500;
 constexpr uint32_t WIFI_STATUS_HOLD_MS = 1300;
 constexpr uint32_t INTRO_FIRST_SCREEN_MIN_MS = 3300;
-// Removed TTP223 and GPIO32 capacitive touch handling entirely.
+// GPIO32 reads the external TTP223's HIGH/LOW signal.
 constexpr int OLED_SDA    = 25;
 constexpr int OLED_SCL    = 26;
-// GPIO32 deliberately left unconfigured; no touch component required.
 constexpr uint8_t OLED_ADDR = 0x3C;         // alternative is often 0x3D
 constexpr uint32_t PET_HEART_LIFETIME_MS = 750;
 constexpr uint32_t FRAME_MS = 33;           // about 30 FPS
-// Touch-event constants removed. Eye, heart and pet animations are retained.
+// Petting is triggered by each NEW sensor HIGH transition.
+// No replay of the startup animation, no long-press calendar action.
 constexpr bool AUTO_SLEEP = true;
 constexpr uint32_t IDLE_SLEEP_MS = 600000;  // 10 minutes of inactivity
 constexpr uint32_t DROWSY_MS = 1800;
@@ -168,11 +174,13 @@ float targetX = 0.0f, targetY = 0.0f;
 float expressionGazeX = 0.0f, expressionGazeY = 0.0f;
 uint32_t gazeStarted = 0, gazeTravelMs = 380, nextLook = 0;
 
-// No touch sensor is connected.
+// Debounced TTP223 momentary input. Never retrigger while its OUT stays HIGH.
+bool touchRawDown = false;
+bool touchStableDown = false;
+uint32_t touchChangedAt = 0;
 uint32_t petTapAt=0;
 uint32_t petHoldBurstAt=0;
 bool petAfterWake=false;
-// Kept petting animation capability; the physical touch input no longer exists.
 
 // ==================== PERSISTENT PET MEMORY ==========================
 // Preferences (ESP32 NVS) survives power-off and normal firmware uploads.
@@ -2226,7 +2234,7 @@ void drawBright(uint32_t dt) {
 void drawPet(uint32_t dt, uint32_t now) {
   // The ^ ^ shape appears on the FIRST frame of the touch, with no
   // 100-200 ms eye-close transition that would make short taps feel late.
-  // The same movement continues indefinitely during a held touch.
+  // The reaction auto-returns in 1.15 s even if TTP223 stays HIGH.
   const float time = (float)(now - stateStarted);
   const float sway = 4.3f * sinf(time * 0.0092f);      // left/right ^ ^ movement
   const float bob = 2.8f * sinf(time * 0.0150f);       // playful bounce
@@ -2358,7 +2366,7 @@ void setState(State next, uint32_t now) {
 
   if (next==State::NORMAL) {
     // Only reboot/wake finishing starts a new idle window. An automatic
-    // expression or a pet reaction cannot extend the 60-second inactivity.
+    // expression or a pet reaction cannot extend the 10-minute inactivity.
     if (old==State::INTRO_PROFILE || old==State::INTRO_BIRTHDAY ||
         (old==State::WAKING && !hungryFromSleep))
       lastInteraction=now;
@@ -2410,11 +2418,52 @@ void startPet(uint32_t now) {
   spawnPetHearts(now);
   if (!wasAlreadyPetting) {
     setState(State::PET, now);
+  } else {
+    // Refresh the short petting window if a genuine second touch is detected.
+    // Don't call setState again, so the eye animation does not restart.
+    stateStarted = now;
   }
   // On every additional tap, keep the current ^ ^ eyes moving smoothly.
   // No intro and no forced normal-eye frame between taps.
   scheduleExpressions(now);
 }
+// TTP223 OUT -> GPIO32, VCC -> 3V3, GND -> GND.
+// Sensor has to return LOW before another physical tap can be detected.
+// Some TTP223 modules linger HIGH for 2-5 s after release: the pet animation
+// still ends on PET_AFTER_TOUCH_MS and does not get trapped in petting mode.
+void updateTouch(uint32_t now) {
+  const bool down = (digitalRead(TOUCH_PIN) == TOUCH_ACTIVE_LEVEL);
+  if (down != touchRawDown) {
+    touchRawDown = down;
+    touchChangedAt = now;
+  }
+  if (down == touchStableDown || now - touchChangedAt < TOUCH_DEBOUNCE_MS)
+    return;
+
+  touchStableDown = down;
+  if (TOUCH_SERIAL_DEBUG) Serial.println(down ? F("TOUCH: DOWN") : F("TOUCH: UP"));
+  if (!down) return;
+
+  // Ignore touches during the introduction and special screens. Petting must
+  // never restart the intro or interrupt a menu, feeding, weather or secrets.
+  if (isIntroState(state) || state == State::MENU ||
+      state == State::CALENDAR || state == State::WEATHER ||
+      state == State::FEEDING || state == State::SECRET_REACTION)
+    return;
+
+  lastInteraction = now;
+  recordPetTouch();    // lifetime pet count, affection & day streak in NVS
+  if (state == State::SLEEP || state == State::DROWSY) {
+    petAfterWake = true;
+    setState(State::WAKING, now); // shake awake, then inverted-V pet reaction
+  } else if (state == State::WAKING) {
+    petAfterWake = true;
+  } else {
+    startPet(now);     // immediate ^ ^ eyes, bouncing hearts; no intro replay
+    buzzerPlay(SoundID::PET, now);
+  }
+}
+
 void updateState(uint32_t now) {
   uint32_t dt=now-stateStarted;
   switch (state) {
@@ -2562,7 +2611,8 @@ void updateState(uint32_t now) {
       if(dt>=GREETING_SHOW_MS){setState(State::NORMAL,now);scheduleExpressions(now);}
       break;
     case State::PET:
-      if(dt>=1150){setState(State::NORMAL,now);scheduleExpressions(now);}
+      // Auto-return independently of sensor HIGH, fixing slow-release TTP223.
+      if(dt>=PET_AFTER_TOUCH_MS){setState(State::NORMAL,now);scheduleExpressions(now);}
       break;
 
     case State::DROWSY:
@@ -2584,7 +2634,8 @@ void updateState(uint32_t now) {
       if (dt>=WAKE_MS) {
         if (petAfterWake) {
           petAfterWake=false;
-          startPet(now);  // The wake-up tap also gets the cute ^ ^ reaction.
+          startPet(now);  // Wake-up tap gets the cute ^ ^ reaction too.
+          buzzerPlay(SoundID::PET, now);
         } else {
           setState(State::NORMAL,now);
           scheduleExpressions(now);
@@ -2593,7 +2644,6 @@ void updateState(uint32_t now) {
       break;
   }
 }
-// Touch hardware removed. PET animation remains available for future input types.
 // ====================== RENDER + HARDWARE ============================
 void render(uint32_t now) {
   display.clearDisplay();   // RAM only; avoids hardware clear/display flicker
@@ -2657,7 +2707,10 @@ void render(uint32_t now) {
 }
 void setup() {
   Serial.begin(115200);
-  // GPIO32 remains unused; no touch sensor setup is required.
+  pinMode(TOUCH_PIN, INPUT);        // digital OUT from external TTP223
+  // Don't count a sensor already HIGH at power-on as a new touch.
+  touchRawDown = touchStableDown = (digitalRead(TOUCH_PIN) == TOUCH_ACTIVE_LEVEL);
+  touchChangedAt = millis();
 
   pinMode(BUTTON_A_PIN, INPUT_PULLUP); // Button A -> GPIO18 and GND
   pinMode(BUTTON_B_PIN, INPUT_PULLUP); // Button B -> GPIO19 and GND
@@ -2681,6 +2734,7 @@ void loop() {
   updateIntroWiFi(now);     // NTP + Open-Meteo once at startup; then Wi-Fi OFF
   updateDisplayContrast();  // only sends commands when contrast actually changes
   updateButtons(now);        // 2 tactile menu keys, non-blocking and debounced
+  updateTouch(now);          // GPIO32 TTP223; non-blocking edge detection
   buzzerUpdate(now);       // nonblocking PWM tone sequencer
   checkPetDateDuringRuntime(now);
   updateState(now);
