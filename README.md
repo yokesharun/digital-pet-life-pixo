@@ -1,203 +1,284 @@
-PIXO PET LIFE v6.1 
-====================================================
-Version: v6.1 based directly on the PIXO v6 Cute Animations firmware
-Target: Classic ESP32 38-pin dev board + 0.96-inch 128x64 SSD1306 OLED
+<div align="center">
 
-FILES
------
-PIXO_Pet_Life_v6_1_Touch_GPIO32.ino - full Arduino sketch
-PIXO_Pet_Life_v6_1_Touch_GPIO32.txt - identical source as plain text
-PIXO_Pet_Life_v6_1_Touch_GPIO32_README.txt - this guide
+# PIXO ♡
+### A tiny digital pet with a big personality
 
-WHAT CHANGED IN v6.1
---------------------
-* Restores the external TTP223 capacitive touch SENSOR on ESP32 GPIO32.
-* A new touch shows PIXO's inverted-V happy eyes, bounce, floating hearts
-  and a petting chime. The touch increases lifetime pet count and affection.
-* Touching a sleeping PIXO wakes it, then plays the petting reaction.
-* Petting automatically returns to the normal eyes after ~1.15 seconds,
-  even if the TTP223 sensor LED/OUT remains HIGH for several seconds.
-* Repeated touches work after the sensor has returned LOW; no start-up replay.
-* GPIO18/19 buttons, GPIO27 buzzer and GPIO25/26 OLED remain unchanged.
-* Existing saved pet profile, birth date, secrets and settings are preserved.
+**ESP32-powered desktop pet · Local Wi-Fi dashboard · OLED animations · Messages & reminders**
 
-RETAINED FROM v6
-----------------
-* User-facing PIXO messages are friendlier and more kawaii. Main menu,
-  daily greeting, food request, and memory cards have been refreshed.
-* Hungry after approximately 5 minutes of play (and again 5 minutes after
-  a feeding or dismissed prompt). The food request dismisses itself after
-  exactly 30 seconds without pressing anything.
-* If PIXO was already asleep when it got hungry, it wakes to ask and, if
-  ignored, settles back to sleep. The prompt is not kept on forever.
-* Auto-sleep starts after 10 minutes of actual inactivity. Random animations
-  do not restart this countdown. A short waking transition remains.
-* Credits/Wi-Fi startup: at least 3.3 seconds plus network status hold.
-  PIXO name page: 2.3 seconds. Hello/introduction: 5.5 seconds.
-  Birthday/profile information: 5.2 seconds.
-  Once-per-day greeting: 5.6 seconds. Birthday show: 14.6 seconds.
-* Birthday and all six other secret event animations run for at least
-  about 12.55 seconds (10 seconds longer than the old 2.55s secret shows).
-  Each has motion across the full duration; Peekaboo repeats hand-covering
-  and sparkle surprises, Alien travels and abducts/returns an eyeball, etc.
-* Strawberry is now plump with leaves and seeds; juice has a straw and
-  bubbles; cake has layers and decorations. Each snack has a little
-  presentation, bites and a thank-you sparkle/heart reaction.
-* Sleeping face now breathes gently, with curved eyelids, blush freckles,
-  a cozy blanket, floating dream bubbles (fish/cake/heart), Zzz and stars.
-* Secret diary has clear three-line hint text and visible status on
-  separate lines with an A/B navigation footer.
-* Sound remains **ON/OFF only**. Each secret uses its own ORIGINAL short
-  melody; birthday is different from the other six. Feeding, hunger,
-  startup, wake-up, sleeping, button presses and headphone animation also
-  have custom sounds. All tunes are non-blocking and may repeat during
-  longer shows. No slider and no stored volume value are added.
-* Everything from v5 is kept: clock with Asia/Kolkata IST, cached Bengaluru
-  weather via Open-Meteo (Wi-Fi only at startup), OLED brightness/night
-  settings, factory reset protection, owner, age/birthday/NVS, two tactile
-  buttons, 12 accessories, test secrets, and first greeting of the day.
-* The TTP223 touch sensor has been ADDED BACK on GPIO32.
+![Platform](https://img.shields.io/badge/Platform-ESP32-8666CA?style=flat-square) ![Framework](https://img.shields.io/badge/Framework-Arduino-7BB2C6?style=flat-square) ![Dashboard](https://img.shields.io/badge/Dashboard-Local%20Wi--Fi-F3A7C0?style=flat-square) ![Storage](https://img.shields.io/badge/Storage-NVS%20%2B%20LittleFS-E9C9AA?style=flat-square)
 
-BEFORE UPLOADING
-----------------
-At the very top of the .ino code set:
-  const char WIFI_SSID[] = "YOUR_2.4_GHZ_WIFI";
-  const char WIFI_PASSWORD[] = "YOUR_WIFI_PASSWORD";
-  const char PET_OWNER_NAME[] = "YOUR NAME";
-Optional developer setting:
-  constexpr bool TEST_MODE_DEFAULT = false;
+**Pet PIXO, send a little message, or set a reminder — right from your phone.**  
+No paid cloud, mobile app installation, or external web host required.
 
-Be aware: TEST_MODE_DEFAULT is only the default for a FRESH flash profile.
-If you already toggled Test Secrets in PIXO Settings, its previously saved
-NVS setting takes precedence. Disable using the menu if needed.
+[Getting started](#-getting-started) · [Hardware](#-hardware--wiring) · [Dashboard](#-web-dashboard) · [API](#-rest-api) · [Troubleshooting](#-troubleshooting)
 
-Arduino IDE: select your classic ESP32 board; install Adafruit GFX and
-Adafruit SSD1306 libraries. ESP32 Arduino provides Wire, WiFi, Preferences,
-HTTPClient, WiFiClientSecure, time and LEDC tone support.
+</div>
 
-WIRING (v6.1)
----------------
-OLED  SDA -> GPIO25
-OLED  SCL -> GPIO26
-OLED  VCC -> 3.3V (if your OLED module supports it)
-OLED  GND -> ESP32 GND
-Button A -> GPIO18 to GND, momentary tactile switch, INPUT_PULLUP
-Button B -> GPIO19 to GND, momentary tactile switch, INPUT_PULLUP
-PASSIVE low-current piezo buzzer + -> GPIO27, negative -> GND
-TTP223 OUT -> GPIO32 (input)
-TTP223 VCC -> ESP32 3.3V (NOT 5V)
-TTP223 GND -> ESP32 GND
-TTP223 B/TOG jumper -> OPEN (momentary mode for normal HIGH-on-touch)
+---
 
-For 4-pin tactile buttons, use one pin from each DIFFERENT electrical pair.
-The two pins along the same internally joined side will not work as a
-button contact. Use a continuity tester to verify leg pair selection.
-Disconnect power when rewiring.
+## ✨ Meet PIXO
 
-SOUND AND VOLUME
-----------------
-Sound ON/OFF is in Settings > Buzzer. B tap toggles, B long saves, A cancels.
-The buzzer must be PASSIVE for melodies to change pitch. Frequencies used
-range roughly 220-784 Hz with different rhythms. If your hardware has an
-ACTIVE buzzer (built-in oscillator), it may produce a single beep or no
-recognizable melody. GPIO PWM cannot guarantee loudness; many small
-piezo elements are louder near their rated resonance. To get more volume,
-use a suitably rated buzzer module and/or transistor driver circuit rather
-than forcing high current through an ESP32 output. Never connect a buzzer
-that exceeds safe GPIO current directly.
+PIXO is a cute, interactive pet that lives on a **0.96-inch monochrome OLED**. It blinks, plays, gets sleepy, asks for snacks, remembers its birthday, and reacts when you pet it.
 
-BUTTON GUIDE
-------------
-A short         Open menu / Back
-A long          Return to PIXO face
-B short         Next page / next setting; when hungry and on PIXO face, FEED
-B long          Select / save current menu item
-A + B together  Secret PEEKABOO; midnight 00:00-00:14 IST -> MIDNIGHT GHOST
-While sleeping  Press A/B or touch sensor to wake
-Touch GPIO32    Pet PIXO: inverted-V eyes, bouncing hearts and petting sound
+**PIXO V1 Smart Dashboard** adds a locally hosted companion interface so you can:
 
-MAIN MENU
----------
-1 My PIXO   - first activation birthday, age, affection, petting history,
-              growth stage, secrets count, owner and favourite reaction
-2 Calendar  - BANGALORE / TODAY for 3s -> Weather for 3s -> PIXO face
-3 Battery   - placeholder; no battery percentage feature yet
-4 Secrets   - use B short to browse readable hints / lock status
-5 Wardrobe  - B short to preview; B long to equip and save
-6 Weather   - cached Bengaluru temperature/conditions (3s preview)
-7 Settings  - OLED brightness, 10 PM-7 AM night mode, Buzzer ON/OFF,
-              clock sync info, owner/memory, test secrets, factory reset
+- 💌 **Send messages** that appear on PIXO's OLED with a notification animation.
+- ⏰ **Schedule reminders** that can wake PIXO and be snoozed with a button.
+- 💜 **Choose moods** such as happy, love, sleepy, and excited.
+- 🌙 **Manage sound, Do Not Disturb, and animation pace.**
+- 📡 **Set up Wi-Fi** without editing your SSID into the firmware.
+- 🧸 **Keep PIXO's existing personality**, petting, feeding, secrets, wardrobe, calendar, weather, and saved memories.
 
-TOUCH SENSOR BEHAVIOUR
-----------------------
-The firmware reads the digital HIGH/LOW output of an external TTP223.
-It does NOT use the ESP32 native touchRead() function.
-Each new LOW-to-HIGH transition (after 18 ms debounce) triggers one pet.
-The petting reaction is ~1.15 seconds, independent of the sensor LED.
-The OLED does not get stuck in petting mode if OUT stays HIGH.
-A new tap can be recognized only AFTER TTP223 OUT has first gone LOW.
-If your sensor light stays on for 2-5 seconds, firmware cannot distinguish
-new finger taps during that continuous HIGH. Confirm B/TOG is open and
-consider a faster-releasing TTP223 module for millisecond repeat tapping.
-Touches during intro, menus, feeding, calendar/weather and secret events
-are ignored so these screens remain usable. They still work in idle,
-random eye animations and sleep.
-For debug: set TOUCH_SERIAL_DEBUG = true; open Serial Monitor at 115200.
-You should see TOUCH: DOWN and TOUCH: UP at the corresponding transitions.
+This project integrates the dashboard with the earlier **PIXO Pet Life v6.1** firmware rather than replacing its pet engine.
 
-HUNGER / SLEEP LOGIC
---------------------
-HUNGER_INTERVAL_MS = 300000 (5 minutes)
-HUNGER_PROMPT_MS   = 30000  (30 seconds)
-IDLE_SLEEP_MS      = 600000 (10 minutes)
+## 📸 Dashboard preview
 
-You can adjust these constants near the top of the file. Hunger displays
-an owner-specific cute request on PIXO's main face. Press B briefly to
-feed one of 3 rotating/random foods. The food animation runs ~4.3 seconds
-and affection increases by 3 (up to 100). If not fed within 30 seconds,
-PIXO stops asking without reducing affection or clearing memories.
+| Desktop | Mobile |
+|:---:|:---:|
+| ![PIXO desktop dashboard](docs/dashboard_preview_desktop.png) | ![PIXO mobile dashboard](docs/dashboard_preview_mobile.png) |
 
-SECRETS (ORIGINAL UNLOCK RULES KEPT)
------------------------------------
-Peekaboo: A+B anytime (except midnight ghost window).
-Birthday: first-activation anniversary; celebratory cake (14.6s).
-Alien Invasion: rare daily chance after age 21 days.
-Angel Mode: age 365 days.
-Midnight Ghost: A+B between midnight and 00:14 IST.
-Royal PIXO: age 7, 14, 30, 90, 180 and 270 days.
-Best Friend: age 365 days; bee friend stays on normal PIXO face.
-Each non-birthday secret animation lasts 12.55 seconds.
+The dashboard uses soft pastel colors, animated PIXO eyes, rounded cards, responsive navigation, and light/dark styling. The web assets are bundled in the ESP32's firmware and render without an external CDN.
 
-Settings > Test secrets > ON permits previewing a selected secret by
-holding B in its Secrets page, WITHOUT permanently awarding age-based
-secret badges. NVS pet stats and original activation day remain unchanged.
+## 🧩 Hardware & wiring
 
-FACTORY RESET WARNING
----------------------
-Settings > Factory reset > B short ARM > B hold continuously for 3 seconds
-will ERASE the PIXO memory namespace. This includes original birthday,
-affection, lifetime progress, personal preferences and accessory unlocks.
-The firmware never resets this data automatically. Use deliberately.
+**Target board:** ESP32 Dev Board, 30-pin, USB-C, CP2102, powered by USB (no battery).
 
-TIME / WEATHER
---------------
-TZ config: Asia/Kolkata; POSIX string IST-5:30 (UTC+05:30).
-Wi-Fi starts once at boot, syncs time using NTP, fetches today's Bengaluru
-weather from Open-Meteo, then switches off. Weather is a startup snapshot.
-Offline/failed sync shows a gentle weather-unavailable notice. The first
-valid synced calendar date is saved permanently as PIXO's birthday.
-Open-Meteo's free no-key service is generally for non-commercial use under
-its terms. For commercial products, verify API license and attribution.
-Prototype HTTPS currently does not validate the API's certificate; enable
-certificate verification and review timeouts for a production device.
+| Part | ESP32 connection | Notes |
+|---|---|---|
+| 0.96-inch SSD1306 OLED | SDA → **GPIO25**, SCL → **GPIO26** | VCC → 3.3 V; GND → GND |
+| TTP223 capacitive touch | OUT → **GPIO32** | VCC → 3.3 V; GND → GND |
+| Button A | **GPIO18** ↔ push button ↔ GND | `INPUT_PULLUP` |
+| Button B | **GPIO19** ↔ push button ↔ GND | `INPUT_PULLUP` |
+| Passive piezo buzzer (low current) | **GPIO27** (+), GND (−) | Use a driver for higher-current modules |
+| ESP32 | USB-C | Provides device power and serial programming |
 
-VERIFICATION
-------------
-Mock C++ integration tests were run on Arduino-ESP32 2.x and 3.x interface
-simulations: button pin assignments, melody selection, settings preservation,
-5-minute scheduling, 30-second hunger timeout, 10-minute inactivity sleep,
-return to sleep when ignored, feeding from B button, 3s calendar/weather,
-12.55-second secret exit and animation drawing. No physical ESP32 or
-actual Arduino IDE library compilation is claimed. Please upload/test on
-your specific display and buzzer; adjust visual clipping if needed.
-Serial Monitor: 115200 baud.
+> **Important:** GPIO numbers are *not* header pin numbers. Follow the silkscreen on your exact ESP32 board. For a four-leg tactile button, connect opposite electrical sides, not two pins permanently connected together. **Never apply 5 V to an ESP32 GPIO.**
+
+See [docs/WIRING.md](docs/WIRING.md) for more detail.
+
+## 🚀 Getting started
+
+### 1. Install the Arduino tools
+
+- [Arduino IDE 2.x](https://www.arduino.cc/en/software)
+- **esp32 by Espressif Systems** from Boards Manager (Arduino-ESP32 **3.x** recommended)
+- **Adafruit SSD1306**, **Adafruit GFX Library**, and **ArduinoJson 7.x** from Library Manager (install prompted dependencies such as Adafruit BusIO)
+
+Built-in ESP32 libraries are used for Wi-Fi, WebServer, mDNS, Preferences, LittleFS, HTTPClient, and time synchronization.
+
+### 2. Flash the firmware
+
+1. Download or clone this repository.
+2. Open **`PixoV1_Dashboard/PixoV1_Dashboard.ino`** in Arduino IDE. Keep `PixoWeb.h` and `PixoWebAssets.h` alongside the sketch.
+3. Select **ESP32 Dev Module**, your USB serial port, and the flash capacity of your device.
+4. Select a partition layout with enough app space **and** a filesystem partition. For a verified 4 MB board, a **Huge APP / No OTA** layout with a compatible FS partition is one possible starting point.
+5. Upload and open Serial Monitor at **115200 baud**.
+
+**Upgrading a pet with existing memories?** Do not enable *Erase All Flash*. Back up flash before repartitioning, since a partition-table change can still invalidate stored data.
+
+### 3. Connect PIXO to Wi-Fi
+
+On first boot PIXO starts a password-protected Wi-Fi setup network:
+
+| | |
+|---|---|
+| Wi-Fi network | `Pixo-Setup` |
+| Setup page | **http://192.168.4.1** |
+| Setup Wi-Fi password | Randomly generated; shown on PIXO's OLED and Serial Monitor |
+| Supported home network | **2.4 GHz Wi-Fi** |
+
+1. Join `Pixo-Setup` from your phone or laptop.
+2. Open **http://192.168.4.1** in a browser (not `https://`).
+3. Choose your home Wi-Fi and enter its password.
+4. Create a **separate dashboard password** (minimum 10 characters).
+5. Allow PIXO to reconnect to your home Wi-Fi. Rejoin that same network on your phone or laptop.
+6. Open **http://pixo.local** or use PIXO's actual IP address shown in its settings/Serial Monitor.
+7. Sign in with username **`pixo`** and the dashboard password you set.
+
+> `.local` requires mDNS support on your network. If it doesn't resolve, the **IP address is the reliable fallback**, for example `http://192.168.1.123`. The IP shown here is only an example, not a fixed address.
+
+### 4. Start playing
+
+Open the dashboard in your browser. Try sending **“Hii PIXO! ♡”**, set a reminder a minute ahead, and press **Button A** to dismiss it or **Button B** to snooze it.
+
+## 💻 Web dashboard
+
+| Area | What you can do |
+|---|---|
+| **Home** | View connection, mood, PIXO face, date/time, and next reminder |
+| **Messages** | Send text, see recent deliveries, delete individual messages or clear history |
+| **Reminders** | Create/edit/delete, enable/disable, and use once/daily/weekdays/weekly repeats |
+| **PIXO Controls** | Trigger expressions, toggle sound and DND, adjust animation pace |
+| **Settings** | View Wi-Fi and IP, choose device name/timezone, change Wi-Fi, restart |
+
+### Messages 💌
+
+- Messages arrive through the ESP32's **local HTTP API**, are stored in flash, and are queued for OLED display.
+- Long text is shown in readable pages rather than flashed too quickly.
+- A message can be dismissed with **Button A**, or it disappears after a display timeout.
+- **Message history:** up to **20** recent messages, max **200 characters** each.
+
+### Reminders ⏰
+
+- Supports **Once**, **Daily**, **Weekdays**, and **Weekly** schedules.
+- Up to **16** reminders, with titles (max **64** characters) and optional descriptions (max **140** characters).
+- A due reminder interrupts the normal pet face and can play a buzzer notification.
+- **Button A:** dismiss. **Button B:** snooze for **5 minutes**.
+- The schedule and snooze state persist even after closing the browser and restarting PIXO.
+- Default device timezone: **Asia/Kolkata (IST)**. Reminders are stored internally as UTC timestamps.
+
+**Important reminder-sound note:** The original dashboard source plays a reminder tune on notification. **Continuous ringing until dismissal is an optional code change**, not guaranteed in this packaged baseline. If you have applied that enhancement locally, test that it also stops on web dismissal, snooze, DND, and sound OFF before documenting it as a completed feature.
+
+## 🐾 Existing pet features preserved
+
+The integrated sketch retains PIXO's existing features, including:
+
+- Animated eyes, blinking, emotions, random reactions, and accessories
+- TTP223 touch-to-pet reaction on GPIO32
+- Hunger prompts, strawberry/juice/cake feeding, and affection tracking
+- Sleep/wake animations and the existing buzzer patterns
+- Birthday, aging, pet history, and secret unlocks
+- Calendar, Bengaluru weather, auto-night-mode, and on-device menus
+
+**On-device button behavior** is context-sensitive:
+
+| Input | Standard action | During a notification |
+|---|---|---|
+| Touch sensor | Pet PIXO | Existing interaction priority applies |
+| Button A (short) | Menu / Back | Dismiss |
+| Button A (long) | Return to face | — |
+| Button B (short) | Next / Feed when hungry | Snooze active reminder 5 min |
+| Button B (long) | Select / Save | — |
+| A + B | Secret Peekaboo / Midnight Ghost | — |
+
+## 🔌 REST API
+
+**Base URL:** `http://pixo.local` or `http://<device-ip>`, from the same trusted LAN. Most dashboard requests require HTTP Basic authentication (`pixo` + your chosen password). Mutating requests require `X-Pixo-Action: 1` and JSON writes require `Content-Type: application/json`.
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/status` | Device state and next reminder |
+| `GET`, `POST`, `DELETE` | `/api/messages` | List, send, or clear all messages |
+| `DELETE` | `/api/messages/{id}` | Delete one message |
+| `GET`, `POST` | `/api/reminders` | List/create reminders |
+| `PUT`, `DELETE` | `/api/reminders/{id}` | Edit/delete a reminder |
+| `POST` | `/api/reminders/{id}/snooze` | Snooze ringing reminder |
+| `POST` | `/api/reminders/{id}/dismiss` | Dismiss ringing reminder |
+| `POST` | `/api/controls` | Mood, sound, DND, animation speed |
+| `GET`, `PUT` | `/api/settings` | Read/update settings |
+| `POST` | `/api/restart` | Restart PIXO |
+| `POST` | `/api/wifi/reset` | Reset Wi-Fi and dashboard login |
+
+**Example: send PIXO a message**
+
+```bash
+curl -u pixo:'YOUR_DASHBOARD_PASSWORD' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Pixo-Action: 1' \
+  -d '{"text":"Hii PIXO! Have a lovely day ♡"}' \
+  http://pixo.local/api/messages
+```
+
+For exact JSON request/response fields and validation limits, see **[docs/API.md](docs/API.md)**. Avoid putting real passwords in public scripts or shell history.
+
+## 📁 Repository structure
+
+```text
+.
+├── README.md
+├── PixoV1_Dashboard/
+│   ├── PixoV1_Dashboard.ino      # Existing pet + dashboard integration
+│   ├── PixoWeb.h                 # Wi-Fi, APIs, storage, reminders, notifications
+│   ├── PixoWebAssets.h           # Generated compressed web assets
+│   ├── tools/
+│   │   └── embed_web.py          # Rebuild embedded HTML/CSS/JS
+│   └── web/
+│       ├── index.html
+│       ├── app.css
+│       ├── app.js
+│       ├── setup.html
+│       └── setup.js
+└── docs/
+    ├── API.md
+    ├── WIRING.md
+    ├── TEST_CHECKLIST.md
+    ├── dashboard_preview_desktop.png
+    └── dashboard_preview_mobile.png
+```
+
+### Editing the dashboard UI
+
+Modify the files in `PixoV1_Dashboard/web/`, then regenerate the firmware-embedded compressed assets:
+
+```bash
+python3 PixoV1_Dashboard/tools/embed_web.py
+```
+
+Upload the rebuilt firmware. **No LittleFS upload is needed for the dashboard pages themselves**; LittleFS is used for persistent message and reminder records.
+
+## 💾 Storage & timekeeping
+
+- **Preferences / NVS `pixo`**: existing pet birthday, affection, wardrobe, secrets, and related data.
+- **Preferences / NVS `pixoweb`**: new dashboard settings, Wi-Fi credentials, authentication verifier, and network setup data.
+- **LittleFS**: message and reminder JSON records, with backup files and write safeguards.
+- **NTP**: synchronizes the clock when internet access is available; PIXO keeps counting time while powered.
+- **After power loss without internet**: schedules remain saved, but due reminders wait until a valid clock is available. No backup RTC is installed.
+
+All required storage is internal to the ESP32 — **no memory card is required**.
+
+## 🔐 Security
+
+This is a **local-first prototype**, not an internet-exposed service.
+
+- Setup uses a password-protected Wi-Fi AP and a user-selected dashboard password.
+- Dashboard pages and APIs use HTTP Basic authentication and write-request checks.
+- **Do not port-forward the ESP32 web server** or put it on untrusted/shared Wi-Fi.
+- Standard ESP32 HTTP is **not HTTPS**; Basic credentials and messages are not encrypted in transit on the LAN.
+- Wi-Fi secrets in regular NVS are not automatically encrypted at rest. For commercial deployments consider flash/NVS encryption, secure boot, and a secure local reverse proxy or another authenticated transport.
+- Browser-based firmware update is intentionally disabled; update over **USB**.
+
+## 🛠 Troubleshooting
+
+| Problem | What to check |
+|---|---|
+| **“Failed to fetch” / dashboard cannot connect** | The browser must reach the *ESP32*, not a local HTML file or `localhost`. Use `http://<actual-device-IP>`, make sure the phone and PIXO are on the same LAN, and avoid HTTPS/mixed-content requests. |
+| `pixo.local` doesn't open | Use the actual IP from PIXO's Settings/Serial Monitor; some routers and clients don't support mDNS reliably. |
+| `Pixo-Setup` page won't load | Join `Pixo-Setup`, stay connected despite “no internet,” and open **http://192.168.4.1** directly. |
+| Wi-Fi connection fails | Confirm **2.4 GHz** SSID/password, signal quality, and whether your router isolates Wi-Fi clients. |
+| Browser shows 401 / login prompt | Username is `pixo`; password is the dashboard password set during provisioning, not the Wi-Fi password. |
+| Reminders don't fire after restart | Check internet/NTP time synchronization and timezone. Without a valid clock, schedules wait. |
+| OLED blank / no pet display | Confirm I²C wiring and OLED power, and check Serial Monitor at 115200 baud. |
+| Buzzer too quiet | Verify it is a passive low-current piezo; frequency and drive circuitry affect loudness. Don't overdrive a GPIO. |
+| Changes to `web/` don't appear | Run `embed_web.py`, recompile, and upload; refresh browser cache. |
+
+If connection still fails, inspect the **Serial Monitor at 115200 baud** for the real IP and server startup output. More verification steps are in [docs/TEST_CHECKLIST.md](docs/TEST_CHECKLIST.md).
+
+## 🧪 Project status
+
+- ✅ Dashboard HTML/CSS/JS smoke-tested in desktop and mobile browser with mock API responses.
+- ✅ Embedded asset generation and basic source checks performed.
+- ⚠️ **Full Arduino compilation on the specific ESP32 board, real Wi-Fi provisioning, physical OLED/button/buzzer behavior, and extended offline reminder reliability still require hardware testing.**
+- ⚠️ This is an **integrated prototype**, not a certified production or safety-critical reminder device.
+
+See the [test checklist](docs/TEST_CHECKLIST.md) before treating reminders as dependable.
+
+## 💜 Roadmap
+
+- End-to-end ESP32 hardware and stability testing
+- Optional repeating reminder alert until dismissal, with proper DND/snooze behavior
+- Backup/restore for pet memories and schedules
+- Optional RTC for accurate offline restarts
+- Improved secure provisioning and firmware update path
+
+## 📄 License
+
+No open-source license has been selected yet. **Add a `LICENSE` file** if you intend to grant others permission to use, modify, or redistribute this project. Until then, ordinary copyright rules apply.
+
+---
+
+<div align="center">
+
+**Made with tiny pixels and a lot of love. ♡**  
+*PIXO is small. The personality isn't.*
+
+</div>
