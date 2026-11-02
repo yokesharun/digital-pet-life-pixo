@@ -31,6 +31,10 @@ PIXO is a cute, interactive pet that lives on a **0.96-inch monochrome OLED**. I
 
 This project integrates the dashboard with the earlier **PIXO Pet Life v6.1** firmware rather than replacing its pet engine.
 
+## 📸 Digital Pet preview
+
+![PIXO desktop dashboard](pixo_v1_design_preview.png)
+
 ## 📸 Dashboard preview
 
 | Desktop | Mobile |
