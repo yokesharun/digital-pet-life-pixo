@@ -1,16 +1,28 @@
-PIXO PET LIFE v6 - CUTER REACTIONS + LONGER SECRET SHOWS
-=======================================================
-Version: v6 based directly on the supplied v5 Weather & Secrets firmware
+PIXO PET LIFE v6.1 - TTP223 TOUCH RESTORED ON GPIO32
+====================================================
+Version: v6.1 based directly on the PIXO v6 Cute Animations firmware
 Target: Classic ESP32 38-pin dev board + 0.96-inch 128x64 SSD1306 OLED
 
 FILES
 -----
-PIXO_Pet_Life_v6_Cute_Animations.ino - full Arduino sketch
-PIXO_Pet_Life_v6_Cute_Animations.txt - identical source as plain text
-PIXO_Pet_Life_v6_README.txt - this guide
+PIXO_Pet_Life_v6_1_Touch_GPIO32.ino - full Arduino sketch
+PIXO_Pet_Life_v6_1_Touch_GPIO32.txt - identical source as plain text
+PIXO_Pet_Life_v6_1_Touch_GPIO32_README.txt - this guide
 
-WHAT CHANGED IN V6
-------------------
+WHAT CHANGED IN v6.1
+--------------------
+* Restores the external TTP223 capacitive touch SENSOR on ESP32 GPIO32.
+* A new touch shows PIXO's inverted-V happy eyes, bounce, floating hearts
+  and a petting chime. The touch increases lifetime pet count and affection.
+* Touching a sleeping PIXO wakes it, then plays the petting reaction.
+* Petting automatically returns to the normal eyes after ~1.15 seconds,
+  even if the TTP223 sensor LED/OUT remains HIGH for several seconds.
+* Repeated touches work after the sensor has returned LOW; no start-up replay.
+* GPIO18/19 buttons, GPIO27 buzzer and GPIO25/26 OLED remain unchanged.
+* Existing saved pet profile, birth date, secrets and settings are preserved.
+
+RETAINED FROM v6
+----------------
 * User-facing PIXO messages are friendlier and more kawaii. Main menu,
   daily greeting, food request, and memory cards have been refreshed.
 * Hungry after approximately 5 minutes of play (and again 5 minutes after
@@ -44,7 +56,7 @@ WHAT CHANGED IN V6
   weather via Open-Meteo (Wi-Fi only at startup), OLED brightness/night
   settings, factory reset protection, owner, age/birthday/NVS, two tactile
   buttons, 12 accessories, test secrets, and first greeting of the day.
-* The physical touch sensor remains REMOVED. GPIO32 stays unused.
+* The TTP223 touch sensor has been ADDED BACK on GPIO32.
 
 BEFORE UPLOADING
 ----------------
@@ -63,8 +75,8 @@ Arduino IDE: select your classic ESP32 board; install Adafruit GFX and
 Adafruit SSD1306 libraries. ESP32 Arduino provides Wire, WiFi, Preferences,
 HTTPClient, WiFiClientSecure, time and LEDC tone support.
 
-WIRING (unchanged from v5)
--------------------------
+WIRING (v6.1)
+---------------
 OLED  SDA -> GPIO25
 OLED  SCL -> GPIO26
 OLED  VCC -> 3.3V (if your OLED module supports it)
@@ -72,7 +84,10 @@ OLED  GND -> ESP32 GND
 Button A -> GPIO18 to GND, momentary tactile switch, INPUT_PULLUP
 Button B -> GPIO19 to GND, momentary tactile switch, INPUT_PULLUP
 PASSIVE low-current piezo buzzer + -> GPIO27, negative -> GND
-Old touch module -> disconnected (GPIO32 is UNUSED)
+TTP223 OUT -> GPIO32 (input)
+TTP223 VCC -> ESP32 3.3V (NOT 5V)
+TTP223 GND -> ESP32 GND
+TTP223 B/TOG jumper -> OPEN (momentary mode for normal HIGH-on-touch)
 
 For 4-pin tactile buttons, use one pin from each DIFFERENT electrical pair.
 The two pins along the same internally joined side will not work as a
@@ -98,7 +113,8 @@ A long          Return to PIXO face
 B short         Next page / next setting; when hungry and on PIXO face, FEED
 B long          Select / save current menu item
 A + B together  Secret PEEKABOO; midnight 00:00-00:14 IST -> MIDNIGHT GHOST
-While sleeping  Press A or B to wake; wait for wake animation to end
+While sleeping  Press A/B or touch sensor to wake
+Touch GPIO32    Pet PIXO: inverted-V eyes, bouncing hearts and petting sound
 
 MAIN MENU
 ---------
@@ -111,6 +127,23 @@ MAIN MENU
 6 Weather   - cached Bengaluru temperature/conditions (3s preview)
 7 Settings  - OLED brightness, 10 PM-7 AM night mode, Buzzer ON/OFF,
               clock sync info, owner/memory, test secrets, factory reset
+
+TOUCH SENSOR BEHAVIOUR
+----------------------
+The firmware reads the digital HIGH/LOW output of an external TTP223.
+It does NOT use the ESP32 native touchRead() function.
+Each new LOW-to-HIGH transition (after 18 ms debounce) triggers one pet.
+The petting reaction is ~1.15 seconds, independent of the sensor LED.
+The OLED does not get stuck in petting mode if OUT stays HIGH.
+A new tap can be recognized only AFTER TTP223 OUT has first gone LOW.
+If your sensor light stays on for 2-5 seconds, firmware cannot distinguish
+new finger taps during that continuous HIGH. Confirm B/TOG is open and
+consider a faster-releasing TTP223 module for millisecond repeat tapping.
+Touches during intro, menus, feeding, calendar/weather and secret events
+are ignored so these screens remain usable. They still work in idle,
+random eye animations and sleep.
+For debug: set TOUCH_SERIAL_DEBUG = true; open Serial Monitor at 115200.
+You should see TOUCH: DOWN and TOUCH: UP at the corresponding transitions.
 
 HUNGER / SLEEP LOGIC
 --------------------
