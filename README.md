@@ -1,4 +1,4 @@
-PIXO PET LIFE v6.1 - TTP223 TOUCH RESTORED ON GPIO32
+PIXO PET LIFE v6.1 
 ====================================================
 Version: v6.1 based directly on the PIXO v6 Cute Animations firmware
 Target: Classic ESP32 38-pin dev board + 0.96-inch 128x64 SSD1306 OLED
