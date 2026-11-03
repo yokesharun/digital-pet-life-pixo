@@ -54,7 +54,7 @@ The dashboard uses soft pastel colors, animated PIXO eyes, rounded cards, respon
 | Button A | **GPIO18** ↔ push button ↔ GND | `INPUT_PULLUP` |
 | Button B | **GPIO19** ↔ push button ↔ GND | `INPUT_PULLUP` |
 | Passive piezo buzzer (low current) | **GPIO27** (+), GND (−) | Use a driver for higher-current modules |
-| ESP32 | USB-C | Provides device power and serial programming |
+| ESP32 | USB-C | Provides device power and serial programming, here i used development board |
 
 > **Important:** GPIO numbers are *not* header pin numbers. Follow the silkscreen on your exact ESP32 board. For a four-leg tactile button, connect opposite electrical sides, not two pins permanently connected together. **Never apply 5 V to an ESP32 GPIO.**
 
